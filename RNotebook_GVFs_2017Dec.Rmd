@@ -35,10 +35,24 @@ library(lattice);library(Hmisc);library(robustbase);library(car); library(MASS);
 ```
 
 ## Step 0. Goals and Objectives
-Explain increasing complexity of modern analysis methods (hierarchical nature a la ver Hoef et al - population process, observation process, perhaps even measurement process).
-And long-standing challenge in environmental monitoring of sustaining data collection effort at adequate levels throughout for the duration required to meet the decision maker's information quality needs regarding the underlying 'population process changes'. Perhaps expand on time scales of common changes of interest in charismatic megafauna relative to magnitudes of the many uncertainty components (environmental stochastic, pop processes, observation - perhaps allude to four categories of uncertainty from AM - partial observability, partial controllability, etc.). 
+Explain long-standing challenge in environmental monitoring of sustaining data collection effort at adequate levels throughout for the duration required to meet the decision maker's information quality needs regarding the underlying 'population process changes'. Perhaps expand on time scales of common changes of interest in charismatic megafauna relative to magnitudes of the many uncertainty components (environmental stochastic, pop processes, observation - perhaps allude to four categories of uncertainty from AM - partial observability, partial controllability, etc.).
 
-Recalling that the fundamental objective of this effort is to improve resource decision making by speeding up the assessment of tradeoffs among survey / monitoring design decisions, one must continually weigh the expected benefits from more in depth development of better performing approximations against the time spent developing the approximation rather than applying it in the simulation study. With that in mind, we illustrate and compare two strategies: (i) a simple strategy that ignores any covariance between $\hat{SE}$ and $\hat{D}$ and approximates the skewness of the MC sampling distribution of $\hat{SE}$ by a log-normal distribution (a la Reynolds et al. 2011), and (ii) [MODIFY] a more accurate approximation that incorporates the postive covariance between $\hat{SE}$ and $\hat{D}$ values from the same simulation but still assumes a log-normal distribution. Considering the joint distribution of the bivariate observation ($\hat{D}$,$log(\hat{SE})$), the former strategy assumes these follow bivariate normal distribution with diagonal variance-covariance matrix, the latter allows for a general variance-covariance matrix. Finally, consideration is given to other transformations for improving the approximation of the sampling distribution of the, perhaps transformed, $\hat{SE}$.
+The fundamental objective of this effort is to improve resource decision making by speeding up the assessment of tradeoffs among survey / monitoring design decisions.
+
+Explain increasing complexity of modern analysis methods (hierarchical nature a la ver Hoef et al - population process, observation process, perhaps even measurement process).
+
+Describe general diagram of pop trend assessment and sources of uncertainty and/or complexity.
+
+Given the diversity of factors influencing final assessment, rapid expansion of computation demands for even the simplest scenarios (sample sizes, monitoring frequency, etc.).
+
+Creates demand for methods of approximating some of the detailed components to speed up computation (as well as perhaps other robustness gains? speed of development?).
+
+Weighing the expected benefits (accuracy and speed of overall design assessment) stemming from more in depth development of better performing approximations against the time spent developing the approximation. What is an effective allocation of effort between developing approximations versus running simulations? 
+
+Particularly interested in assessment methods constructible from initial analyses of pilot project data.
+
+
+With that in mind, we illustrate and compare two strategies: (i) a simple strategy that ignores any covariance between $\hat{SE}$ and $\hat{D}$ and approximates the skewness of the MC sampling distribution of $\hat{SE}$ by a log-normal distribution (a la Reynolds et al. 2011), and (ii) [MODIFY] a more accurate approximation that incorporates the postive covariance between $\hat{SE}$ and $\hat{D}$ values from the same simulation but still assumes a log-normal distribution. Considering the joint distribution of the bivariate observation ($\hat{D}$,$log(\hat{SE})$), the former strategy assumes these follow bivariate normal distribution with diagonal variance-covariance matrix, the latter allows for a general variance-covariance matrix. Finally, consideration is given to other transformations for improving the approximation of the sampling distribution of the, perhaps transformed, $\hat{SE}$.
 
 ## Step 1. Compile Simulation results & clean up, reformat, etc.
 The analysis assumes the simulation code exists, the basic simulations have been conducted and results imported into R (if not already there by creation).
