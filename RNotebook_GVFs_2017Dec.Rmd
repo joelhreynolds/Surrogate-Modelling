@@ -1,0 +1,2948 @@
+---
+title: 'R Notebook: Speeding up monitoring design simulations using GVFs and other
+  analytical approximations'
+output:
+  word_document: default
+  pdf_document:
+    fig_caption: yes
+  html_notebook: default
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+# Code and Details supporting the manuscript
+Issues to Resolve
+* Resolve working directory issue.
+# current plan is running options(knitr.package.progress=TRUE,knitr.package.root.dir=NULL) outside knitr. Figure out how to put in ~/.Rprofile
+* why plot from 'Per Unit Variances' not showing up in Preview? (Step 2.iiii.b)
+* (eventually) simplify description, tighten; consistency of symbols
+* cross check results against Biol Cons
+* Figure captions, labels, cross-references
+* clean up code to delete unnecessary intermediate objects upon completion
+
+```{r, eval=TRUE, echo=FALSE}
+# Attach Libraries
+library(lattice);library(Hmisc);library(robustbase);library(car); library(MASS);library(qqtest); library(gsl);library(moments); library(ROptEst);library(RobAStBase); #library(fitdistrplus);library(ADGofTest); library(PearsonDS); 
+
+# Hmisc for
+# robustbase for robust estimation of location and scale
+# MASS::fitdistr to get parameter estimates for use in comparing against
+#   gamma, f, logistic, chi-squared, cauchy, beta
+# ADGofTest for 
+# PearsonDS for fitting Pearson Family of Distributions for SE-hat simulation results
+# qqtest (remove?) for self-calibrated qq plot for assessing distributional shape.
+
+```
+
+## Step 0. Goals and Objectives
+Explain increasing complexity of modern analysis methods (hierarchical nature a la ver Hoef et al - population process, observation process, perhaps even measurement process).
+And long-standing challenge in environmental monitoring of sustaining data collection effort at adequate levels throughout for the duration required to meet the decision maker's information quality needs regarding the underlying 'population process changes'. Perhaps expand on time scales of common changes of interest in charismatic megafauna relative to magnitudes of the many uncertainty components (environmental stochastic, pop processes, observation - perhaps allude to four categories of uncertainty from AM - partial observability, partial controllability, etc.). 
+
+Recalling that the fundamental objective of this effort is to improve resource decision making by speeding up the assessment of tradeoffs among survey / monitoring design decisions, one must continually weigh the expected benefits from more in depth development of better performing approximations against the time spent developing the approximation rather than applying it in the simulation study. With that in mind, we illustrate and compare two strategies: (i) a simple strategy that ignores any covariance between $\hat{SE}$ and $\hat{D}$ and approximates the skewness of the MC sampling distribution of $\hat{SE}$ by a log-normal distribution (a la Reynolds et al. 2011), and (ii) [MODIFY] a more accurate approximation that incorporates the postive covariance between $\hat{SE}$ and $\hat{D}$ values from the same simulation but still assumes a log-normal distribution. Considering the joint distribution of the bivariate observation ($\hat{D}$,$log(\hat{SE})$), the former strategy assumes these follow bivariate normal distribution with diagonal variance-covariance matrix, the latter allows for a general variance-covariance matrix. Finally, consideration is given to other transformations for improving the approximation of the sampling distribution of the, perhaps transformed, $\hat{SE}$.
+
+## Step 1. Compile Simulation results & clean up, reformat, etc.
+The analysis assumes the simulation code exists, the basic simulations have been conducted and results imported into R (if not already there by creation).
+
+### Simulation Scenarios
+The example focuses on the simulated surveys of brown bears on Togiak NWR. See Walsh et al. (2010) for motivating survey details and Reynolds et al. (2011) for simulation details. Specifically, 
+* under a density of 40.3 bears/1000 km^2, 500 simulations were conducted for each sample size ('Ntransects') setting: 800, 1000, 1200, 1400, 1600; each transect was 25 km long by 'r (Model1$wMax-Model1$wb)' m wide. 
+* under a sample size of n=1000 transects, 500 simulations were conducted for each additional density 20, 80, and 160 bears / 1000 km^2.
+
+### Simulation Set Up ('Fixed World') and Observation Process
+All simulations of the observation process were conducted on a single fixed realization of a random uniform spatial density process determing bear group locations on a square domain of size 21 178 km^2 (see 'Dens20MCsims1000.r'), with each group's size randomly drawn from the observed empirical group size distribution from Walsh et al. (2010).
+
+For each simulation scenario (D=density, n=# of transects), the detailed observation process model was used to simulate 500 estimated densities and their standard errors (using 600 bootstrap replicates for each simulation). A total of (8 scenarios x 500 MC simulations) = 4000 detailed simulations of the observation process were conducted. 
+
+**comment on computational time***  
+
+```{r "Input", eval=TRUE, echo=FALSE, cache=TRUE}
+#################
+# ISSUE: Rstudio (rightfully) runs knitr in a separate daughter R session.
+#        Thus objects in the working directory of an interactive session that 
+#        are called, but not created, in a markup report _won't be found_.
+# CURRENT SOLUTION: call standalone *.Rdata files with those 'input' objects;
+#        load() *.Rdata file at beginning of Rmd file (early phase code chunk). 
+#################
+## 1. Source existing *.Rdata objects from simulations,
+## 2. collate into single data frame. Relabeled as '2017'
+#################
+## SOURCE: initial load() calls + MADBSimResultsCollate.R
+#################
+
+
+
+#################
+## 1. Source existing *.Rdata objects from simulations
+## NOTE: hardwired directory path
+#################
+computer<-"MBA" #"NPS"
+DIR<-ifelse(computer=="NPS",
+            "C:/Users/jhreynolds/Documents/Projects/Approx Std Errors/Togiak Design Assessments/ModelAssistedDesignBasedJune2009/SimResults/",
+"/Users/joel/Documents/Projects/Approx Std Errors/ModelAssistedDesignBasedJune2009/SimResults/")
+
+
+load(paste(DIR,"SimResults800TransTotal.Rdata", sep=""))
+load(paste(DIR,"SimResults1000TransTotal.Rdata", sep=""))
+load(paste(DIR,"SimResults1200TransTotal.Rdata", sep=""))
+load(paste(DIR,"SimResults1400TransTotal.Rdata", sep=""))
+load(paste(DIR,"SimResults1600TransTotal.Rdata", sep=""))
+
+load(paste(DIR,"Dens20SimResults1000TransTotal.Rdata", sep=""))
+load(paste(DIR,"Dens80SimResults1000TransTotal.Rdata", sep=""))
+load(paste(DIR,"Dens160SimResults1000TransTotal.Rdata", sep=""))
+load(paste(DIR,"Dens80SimResults1000TransTotal.Rdata", sep=""))
+
+#################
+## 2. collate into single data frame. Relabeled as '2017'
+#################
+
+# Results under density D=40.3 bears/1000 km^2 and with varying number of transects
+#TogiakModelAssistDBSimResults2017<-
+
+blah<-as.data.frame(rbind(cbind(Ntransects=800,SimResults800TransTotal),
+    cbind(Ntransects=1000,SimResults1000TransTotal),
+    cbind(Ntransects=1200,SimResults1200TransTotal),
+    cbind(Ntransects=1400,SimResults1400TransTotal),
+    cbind(Ntransects=1600,SimResults1600TransTotal)))
+
+# check that results look reasonable
+#xyplot(BootSENaDens~NaDens|Ntransects,data=TogiakModelAssistDBSimResults2017)
+xyplot(BootSENaDens~NaDens|Ntransects,data=blah)
+
+
+# Results under n = 1000 transects and with varying densities
+#TogiakModelAssistDBDensSimResults2017<-
+blahDens<- as.data.frame(Ntransects=1000,
+    rbind(cbind(Dens=20,Dens20SimResults1000TransTotal),
+    cbind(Dens=40.3,SimResults1000TransTotal),
+    cbind(Dens=80,Dens80SimResults1000TransTotal),
+    cbind(Dens=160,Dens160SimResults1000TransTotal)))
+# check that results look reasonable
+#xyplot(BootSENaDens~NaDens|Dens,data=TogiakModelAssistDBDensSimResults2017)
+xyplot(BootSENaDens~NaDens|Dens,data=blahDens)
+
+```
+
+### Step 1.i Rescaling Corrections
+#### Step 1.i.a Rescale Count Estimates from Suvey Area to Study Area 
+The number of bear groups (Ng) and number of bears (Na) encountered are estimates for the total **surveyed** area and need to be rescaled to estimate the numbers in the total **study** area. Similarly need to rescale their standard error estimates. In each case, the rescaling factor is the same: $21 178 \text{ km}^2 / (25 \text{ m } \times \text{ Ntransects } \times \text{transect width in m}/1000 \text{ m }) = \frac{1163.626}{\text{Ntransects}}$. 
+
+```{r,eval=TRUE,echo=FALSE, cache=TRUE}
+#################
+## SOURCE: MADBSimResultsCollate.R
+#################
+#    if you want to get # in terms of study area rescale by STUDY AREA/SURVEYED AREA.
+#    I.e., Dens x STUDY AREA km^2 / SURVEY AREA
+#               * 21178           / (25 *Ntransects*((Model1$wMax-Model1$wb)/1000) 
+#    units        km^2            / (km *n*           (m/1000))
+#                                   length in km * # transects * transect width in KM   
+#
+# Model1$wMax-Model1$wb = 728 m
+trashRescaleSurveytoStudy <- 21178 / (25 *(728/1000))
+# Re-scale transect simulations: Na, BootSENa 
+blah$Na<-blah$Na*trashRescaleSurveytoStudy/blah$Ntransects
+blah$BootSENa<-blah$BootSENa*trashRescaleSurveytoStudy/blah$Ntransects
+
+# Ng, BootSENg 
+blah$Ng<-blah$Ng*trashRescaleSurveytoStudy/blah$Ntransects
+blah$BootSENg<-blah$BootSENg*trashRescaleSurveytoStudy/blah$Ntransects
+             
+# Re-scale Density simulations: NA, BootSENa
+blahDens$Na<-blahDens$Na*trashRescaleSurveytoStudy/1000
+blahDens$BootSENa<-blahDens$BootSENa*trashRescaleSurveytoStudy/1000
+
+# Ng, BootSENg                  
+blahDens$Ng<-blahDens$Ng*trashRescaleSurveytoStudy/1000
+blahDens$BootSENg<-blahDens$BootSENg*trashRescaleSurveytoStudy/1000
+
+cat("Count estimates (Na, Ng, associated SEs) rescaled from survey area to full study area.")
+                                  
+```
+
+#### Step 1.i.b Correct Density Estimates from km x m to km^2 
+Due to coding oversight in CIwidth11Jun09.r, the densities are estimated with respect to survey area in $\text{km } \times \text{ m}$ rather than $km^2$. To correct the densities to units of per 1000 $km^2$, we divided Area in Dens and SEDens estimates by 1000 to convert width in Area calculation to km.
+```{r,eval=TRUE, echo=FALSE, cache=TRUE}
+#################
+## SOURCE: MADBSimResultsCollate.R
+#################
+# Transect Simulations
+blah$NaDens<-blah$NaDens*1000
+blah$BootSENaDens<-blah$BootSENaDens*1000
+blah$NgDens<-blah$NgDens*1000
+blah$BootSENgDens<-blah$BootSENgDens*1000
+# Check
+xyplot(BootSENaDens~NaDens|Ntransects,data=blah)
+xyplot(BootSENgDens~NgDens|Ntransects,data=blah)
+
+# Density Simulations
+blahDens$NaDens<-blahDens$NaDens*1000
+blahDens$BootSENaDens<-blahDens$BootSENaDens*1000
+blahDens$NgDens<-blahDens$NgDens*1000
+blahDens$BootSENgDens<-blahDens$BootSENgDens*1000
+
+# Check
+xyplot(BootSENaDens~NaDens|Dens,data=blahDens)
+xyplot(BootSENgDens~NgDens|Dens,data=blahDens)
+
+### Save as working copy
+TogiakModelAssistDBSimResults2017July11<-blah
+TogiakModelAssistDBDensSimResults2017July11<-blahDens
+```
+
+### Step 1.ii Check convergence
+Check number of number of failed convergences among MC sims and their bootstraps.
+```{r, eval=TRUE, echo=FALSE, cache=TRUE}
+#################
+## SOURCE: MADBSimResultsCollate.R
+#################
+trash<-TogiakModelAssistDBSimResults2017July11
+tapply(trash$Failures,trash$Ntransects,table) # of 500 MC trials total
+```
+Of the 500 MC simulations of surveys with '800' transects, 417 had no convergence issues (83%); on the other extreme, two had 14 of the 600 bootstrap replicates fail to converge (2.33%). For the 500 MC simulations of surveys with '1200' transects, the worse case was two simulations which converged initially but none of their bootstrap replicates did. These simulations were later dropped from further analysis.
+
+
+```{r, eval=TRUE, echo=FALSE, cache=TRUE}
+#################
+## SOURCE: MADBSimResultsCollate.R
+#################
+### Dens Sims
+trashDens<-TogiakModelAssistDBDensSimResults2017July11
+tapply(trashDens$Failures,trashDens$Dens,table) # of 500 MC trials total
+```
+For the '20 bears per 1000 km^2' density scenario, one of the 500 MC trials converged initially but none of its bootstrap replicates did.
+
+### Step 1.iii Reformat and drop simulations with lack of convergence for bootstrap replicates
+Prep data for various summaries.
+```{r 'Data Compilation', eval=TRUE, echo=FALSE, cache=TRUE}
+#################
+## SOURCE: MADBSimResultsCollate.R
+#################
+trash<-TogiakModelAssistDBSimResults2017July11
+# names(TogiakModelAssistDBSimResults2017July11)
+# [1] "Ntransects"       "Failures"         "Ng"               "Na"               "NgDens"     
+# [6] "NaDens"           "MaxPilot"         "MaxPass"          "PilotInt"         "PilotlESD"   #[11] "PilotShape"       "PassInt"          "PasslESD"         "PassShape"        "BootSENg"    #[16] "BootSENa"         "BootSENgDens"     "BootSENaDens"     "BootSEMaxPilot"   "BootSEMaxPass"   
+#[21] "BootSEPilotInt"   "BootSEPilotlESD"  "BootSEPilotShape" "BootSEPassInt"    "BootSEPasslESD"  
+#[26] "BootSEPassShape" 
+
+#reshape
+trashLong<-reshape(trash,varying=list(c(3:14),c(15:26)), 
+    v.names=c("PtEst","SE"),
+    ids=trash$Ntransects*1000+seq(500),
+    times=dimnames(trash)[[2]][3:14],
+    direction="long")
+row.names(trashLong)<-NULL
+# drop simulations where all the bootstrap replicates failed to converge
+trashLong<-trashLong[trashLong$Failures!=600,]
+
+trashDens<-TogiakModelAssistDBDensSimResults2017July11
+#reshape
+trashDensLong<-reshape(trashDens,varying=list(c(3:14),c(15:26)), 
+    v.names=c("PtEst","SE"),
+    ids=trashDens$Dens*10000+seq(500),
+    times=dimnames(trashDens)[[2]][3:14],
+    direction="long")
+# drop simulations where all the bootstrap replicates failed to converge
+trashDensLong<-trashDensLong[trashDensLong$Failures!=600,]
+row.names(trashDensLong)<-NULL
+```
+
+
+
+
+## Step 2. Analytical Approximation to MC sampling distribution of $\hat{D}_{n,\theta}$ for brown bear density ('NaDens')
+
+### Step 2.i Shape
+The estimator of $D$ is a 'model assisted, design-based' estimator using a mark-recapture distance sampling approach in conjunction with a "Hortwitz-Thompson"-like estimator (**Becker ref**). Subsequently, the general expectation is that the sampling distribution of $\hat{D}_{n,D}$ is approximately Normal for any combination of $n$ and $D$ (REF?).  The approximation appears adequate for the current application for each of the Monte Carlo simulation results from the $D = 40.3$ brown bears / 1000 km^2 scenarios (Figure X). While the empirical distribution of the simulation estimates from each scenario includes a slightly thicker right tail than expected from a Normal distribution, this wasn't deemed severe enough a departure to warrant further attention relative to the potential computational benefits of the approximation.
+```{r, eval=TRUE, echo=FALSE, cache=TRUE}
+######################
+## From ModelAssistedDBSamplingDists.R
+######################
+
+##############
+# 1. Sampling Dist of NaDens
+# normality of Pt Est?
+qqmath(~PtEst|as.factor(Ntransects),data=trashLong, 
+    subset=time=="NaDens",horizontal=T,ylim=c(10,80),
+    xlab="std normal dist",ylab="mc NaDens dist",main="MC NaDens Estimates",
+    na.rm=TRUE,distribution=qnorm,prepanel=prepanel.qqmathline,
+    panel=function(x,...){
+        panel.qqmathline(x, ...)
+        panel.qqmath(x, ...)})
+        #panel.text(0,120,paste("p value: ",round(shapiro.test(x)$p,3)))})
+```
+
+#### Step 2.i.a Exploring magnitude of departure in right tails
+Using the qqtest package (Oldham 2016, TAS) for more informed visual assessment of departures from normality of the empirical sampling distribution of the n=500 simulated densities from each of the simulation scenarios. Focusing here on the D=40.3 bears / 1000 km^2 scenario with varying numbers of transects. 
+
+```{r, eval=FALSE, echo=FALSE, cache=FALSE}
+######################
+## 17 March 2017, using package qqtest. 800 transects
+######################
+
+##############
+# 1. Sampling Dist of NaDens, of SE(NaDens)?
+# normality of Pt Est using qqtest. ONE Scenario at a time.
+Index<-unique(trashLong$Ntransects)
+#Extract results for specific Ntransects setting
+i<-1 #scenario index
+blah<-trashLong[trashLong$Ntransects==Index[i],]
+# Extract NaDens
+blah<-blah$PtEst[blah$time=="NaDens"]
+#  gaussian - qqplot, but now showing in the line up
+result <- qqtest(blah, dist="normal", lineup=TRUE, main="Suspect", legend=FALSE,nreps=100,nsuspects = 9,
+                 cex=0.75, col="grey20", ylab="", pch=21)
+```
+
+```{r, eval=FALSE, echo=FALSE}
+# the location of the real data in the line up can be found by evaluating
+# the contents of the string
+ result$TrueLoc
+# Cut and paste the string contents into the R console, or evaluate
+ eval(parse(text=result$TrueLoc))
+```
+
+```{r, eval=FALSE, echo=FALSE}
+######################
+## 17 March 2017, using package qqtest. 1000 transects -
+######################
+
+##############
+# 1. Sampling Dist of NaDens, of SE(NaDens)?
+# normality of Pt Est using qqtest. ONE Scenario at a time.
+#Extract results for specific Ntransects setting
+i<-2 #scenario index
+blah<-trashLong[trashLong$Ntransects==Index[i],]
+# Extract NaDens
+blah<-blah$PtEst[blah$time=="NaDens"]
+#  gaussian - qqplot, but now showing in the line up
+result <- qqtest(blah, dist="normal", lineup=TRUE, main="Suspect",legend=FALSE,nreps=100,nsuspects = 9,
+                 cex=0.75, col="grey20", ylab="", pch=21)
+```
+
+```{r, eval=FALSE, echo=FALSE}
+# the location of the real data in the line up can be found by evaluating
+# the contents of the string
+ result$TrueLoc
+# Cut and paste the string contents into the R console, or evaluate
+ eval(parse(text=result$TrueLoc))
+```
+
+```{r, eval=FALSE, echo=FALSE}
+######################
+## 17 March 2017, using package qqtest. 1200 transects -
+######################
+
+##############
+# 1. Sampling Dist of NaDens, of SE(NaDens)?
+# normality of Pt Est using qqtest. ONE Scenario at a time.
+#  gaussian - qqplot, but now showing in the line up
+#Extract results for specific Ntransects setting
+i<-3 #scenario index
+blah<-trashLong[trashLong$Ntransects==Index[i],]
+# Extract NaDens
+blah<-blah$PtEst[blah$time=="NaDens"]
+# drop two NAs. Why showing up?
+blah<-blah[!is.na(blah)]
+#  gaussian - qqplot, but now showing in the line up
+result <- qqtest(blah, dist="normal", lineup=TRUE, main="Suspect", legend=FALSE,nreps=100,nsuspects = 9,
+                 cex=0.75, col="grey20", ylab="", pch=21)
+```
+
+```{r, eval=FALSE, echo=FALSE}
+# the location of the real data in the line up can be found by evaluating
+# the contents of the string
+ result$TrueLoc
+# Cut and paste the string contents into the R console, or evaluate
+ eval(parse(text=result$TrueLoc))
+```
+
+```{r, eval=FALSE, echo=FALSE}
+######################
+## 17 March 2017, using package qqtest. 1400 transects -
+######################
+
+##############
+# 1. Sampling Dist of NaDens, of SE(NaDens)?
+# normality of Pt Est using qqtest. ONE Scenario at a time.
+#  gaussian - qqplot, but now showing in the line up
+#Extract results for specific Ntransects setting
+i<-4 #scenario index
+blah<-trashLong[trashLong$Ntransects==Index[i],]
+# Extract NaDens
+blah<-blah$PtEst[blah$time=="NaDens"]
+#  gaussian - qqplot, but now showing in the line up
+result <- qqtest(blah, dist="normal", lineup=TRUE, main="Suspect", legend=FALSE,nreps=100,nsuspects = 9,
+                 cex=0.75, col="grey20", ylab="", pch=21)
+```
+
+```{r, eval=FALSE, echo=FALSE}
+# the location of the real data in the line up can be found by evaluating
+# the contents of the string
+ result$TrueLoc
+# Cut and paste the string contents into the R console, or evaluate
+ eval(parse(text=result$TrueLoc))
+```
+
+```{r, eval=FALSE, echo=FALSE}
+######################
+## 17 March 2017, using package qqtest. 1600 transects -
+######################
+
+##############
+# 1. Sampling Dist of NaDens, of SE(NaDens)?
+# normality of Pt Est using qqtest. ONE Scenario at a time.
+#  gaussian - qqplot, but now showing in the line up
+#Extract results for specific Ntransects setting
+i<-5 #scenario index
+blah<-trashLong[trashLong$Ntransects==Index[i],]
+# Extract NaDens
+blah<-blah$PtEst[blah$time=="NaDens"]
+#  gaussian - qqplot, but now showing in the line up
+result <- qqtest(blah, dist="normal", lineup=TRUE, main="Suspect", legend=FALSE,nreps=100,nsuspects = 9,
+                 cex=0.75, col="grey20", ylab="", pch=21)
+```
+
+```{r, eval=FALSE, echo=FALSE}
+# the location of the real data in the line up can be found by evaluating
+# the contents of the string
+ result$TrueLoc
+# Cut and paste the string contents into the R console, or evaluate
+ eval(parse(text=result$TrueLoc))
+```
+
+#### Step 2.i.b Assess departure in tails? (minor point)
+The magnitude of the depature in the right tail was approximated by using robust estimates of mean and var of each set of simulation results and visually assessing where (pointwise) the distribution of simulation results departed from the pointwise envelope of a sample of 100 Normal distributions. Using the qqtest package (Oldham 2016, TAS).
+
+```{r, eval=TRUE, echo=FALSE, cache=TRUE,fig.width=5,fig.height=5}
+######################
+## 22 June 2017, using package qqtest - way to assess percentile in right tail
+######################
+
+##############
+# 1. Sampling Dist of NaDens, of SE(NaDens)?
+# normality of Pt Est using qqtest. ONE Scenario at a time.
+#  gaussian - qqplot, but just show one panel, use sim shadow to decide on departure
+
+#Ntransect settings
+Index<-seq(800,1600,200) 
+#Extract results for specific Ntransects setting
+i<-1 #scenario index
+blah<-trashLong[trashLong$Ntransects==Index[i],]
+# Extract NaDens
+blah<-blah$PtEst[blah$time=="NaDens"]
+#  gaussian - qqplot, but now showing in the line up
+result <- qqtest(blah, dist="normal", lineup=FALSE, 
+                 main=paste(Index[i]," Transects"), legend=FALSE,nreps=100,
+                 cex=0.75, col="grey20", ylab="", pch=21,xAxisAsProbs = TRUE,
+                 yAxisAsProbs=TRUE,
+                 xAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)),                                      yAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)))
+#abline(v=qnorm(c(seq(.75,.95,.05),seq(.96,.99,.01))))
+abline(h=quantile(blah,probs=c(seq(.75,.95,.05),seq(.96,.99,.01))))
+```
+
+```{r, eval=FALSE, echo=FALSE, cache=TRUE,fig.width=5,fig.height=5}
+######################
+## 22 June 2017, using package qqtest - way to assess percentile in right tail
+######################
+
+##############
+# 1. Sampling Dist of NaDens, of SE(NaDens)?
+# normality of Pt Est using qqtest. ONE Scenario at a time.
+#  gaussian - qqplot, but just show one panel, use sim shadow to decide on departure
+#Extract results for specific Ntransects setting
+i<-2 #scenario index
+blah<-trashLong[trashLong$Ntransects==Index[i],]
+# Extract NaDens
+blah<-blah$PtEst[blah$time=="NaDens"]
+#  gaussian - qqplot, but now showing in the line up
+result <- qqtest(blah, dist="normal", lineup=FALSE, main=paste(Index[i]," Transects"), legend=FALSE,nreps=100,#nsuspects = 4,
+                 cex=0.75, col="grey20", ylab="", pch=21,xAxisAsProbs = TRUE,
+                 yAxisAsProbs=TRUE,
+                 xAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)),                     yAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)))
+abline(v=qnorm(c(seq(.75,.95,.05),seq(.96,.99,.01))))
+abline(h=quantile(blah,probs=c(seq(.75,.95,.05),seq(.96,.99,.01))))
+```
+```{r, eval=TRUE, echo=FALSE, cache=TRUE,fig.width=5,fig.height=5}
+######################
+## 22 June 2017, using package qqtest - way to assess percentile in right tail
+######################
+
+##############
+# 1. Sampling Dist of NaDens, of SE(NaDens)?
+# normality of Pt Est using qqtest. ONE Scenario at a time.
+#  gaussian - qqplot, but just show one panel, use sim shadow to decide on departure
+#Extract results for specific Ntransects setting
+i<-3 #scenario index
+blah<-trashLong[trashLong$Ntransects==Index[i],]
+# Extract NaDens
+blah<-blah$PtEst[blah$time=="NaDens"]
+blah<-blah[!is.na(blah)] # drop two NAs - source?
+#  gaussian - qqplot, but now showing in the line up
+result <- qqtest(blah, dist="normal", lineup=FALSE, main=paste(Index[i]," Transects"), legend=FALSE,nreps=100,#nsuspects = 4,
+                 cex=0.75, col="grey20", ylab="", pch=21,xAxisAsProbs = TRUE,
+                 yAxisAsProbs=TRUE,
+                 xAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)),                     yAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)))
+abline(v=qnorm(c(seq(.75,.95,.05),seq(.96,.99,.01))))
+abline(h=quantile(blah,probs=c(seq(.75,.95,.05),seq(.96,.99,.01))))
+```
+
+```{r, eval=TRUE, echo=FALSE, cache=TRUE,fig.width=5,fig.height=5}
+######################
+## 22 June 2017, using package qqtest - way to assess percentile in right tail
+######################
+
+##############
+# 1. Sampling Dist of NaDens, of SE(NaDens)?
+# normality of Pt Est using qqtest. ONE Scenario at a time.
+#  gaussian - qqplot, but just show one panel, use sim shadow to decide on departure
+#Extract results for specific Ntransects setting
+i<-4 #scenario index
+blah<-trashLong[trashLong$Ntransects==Index[i],]
+# Extract NaDens
+blah<-blah$PtEst[blah$time=="NaDens"]
+#  gaussian - qqplot, but now showing in the line up
+result <- qqtest(blah, dist="normal", lineup=FALSE, main=paste(Index[i]," Transects"), legend=FALSE,nreps=100,#nsuspects = 4,
+                 cex=0.75, col="grey20", ylab="", pch=21,xAxisAsProbs = TRUE,
+                 yAxisAsProbs=TRUE,
+                 xAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)),                     yAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)))
+abline(v=qnorm(c(seq(.75,.95,.05),seq(.96,.99,.01))))
+abline(h=quantile(blah,probs=c(seq(.75,.95,.05),seq(.96,.99,.01))))
+```
+
+```{r, eval=TRUE, echo=FALSE, cache=TRUE,fig.width=5,fig.height=5}
+######################
+## 22 June 2017, using package qqtest - way to assess percentile in right tail
+######################
+
+##############
+# 1. Sampling Dist of NaDens, of SE(NaDens)?
+# normality of Pt Est using qqtest. ONE Scenario at a time.
+#  gaussian - qqplot, but just show one panel, use sim shadow to decide on departure
+#Extract results for specific Ntransects setting
+i<-5 #scenario index
+blah<-trashLong[trashLong$Ntransects==Index[i],]
+# Extract NaDens
+blah<-blah$PtEst[blah$time=="NaDens"]
+#  gaussian - qqplot, but now showing in the line up
+result <- qqtest(blah, dist="normal", lineup=FALSE, main=paste(Index[i]," Transects"), legend=FALSE,nreps=100,#nsuspects = 4,
+                 cex=0.75, col="grey20", ylab="", pch=21,xAxisAsProbs = TRUE,
+                 yAxisAsProbs=TRUE,
+                 xAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)),                     yAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)))
+abline(v=qnorm(c(seq(.75,.95,.05),seq(.96,.99,.01))))
+abline(h=quantile(blah,probs=c(seq(.75,.95,.05),seq(.96,.99,.01))))
+```
+
+**Worth figuring out mass out in extreme tails?**
+Consider quantitative assessment of departure. Note that the percentile itself isn't fully informative since it doesn't capture the nature of the departure (e.g., parallel rather than extremely sharp).
+PONDER. 
+
+The extreme tails tend to depart from Normality. Some caveats to keep in mind however. (i) The 500 Monte Carlo simulations provide very high power for detecting 'departures' from Normality. (ii) However, the importance of these departures must be judged by the objectives of this effort - e.g., identifying an 'adequate' representation for analytically approximating the empirical sampling distribution of the simulation results in order to speed up conducting the design study. (iii) The fundamental tradeoff is one of time spent identifying approximations versus spent conducting detailed simulations. Keeping in mind the many sources of variation (e.g., Total Survey Error) implementing wildlife survey methods, the current findings appear quite adequate as analytical approximation.
+
+*Side note*: Interesting questions raised about tail behavior of estimator. Deeper investigations (not shown) reveal slight bias in the underlying detection function parameter estimates (ref 2010 JSM?), but not pursued further here. stemming from H-T estimator? **see Kevin White & Grey Pendleton side note in goat sightability work in SE AK.**
+
+
+### Step 2.ii Location for untransformed
+The thicker-than-Normal right tail of the distribution of simulation results (boxplots below) warranted use of robust estimation methods for Location and scale, an alternative to classical statistical estimation that are less affected by small departures from model assumptions, such as the occurrence of outliers (Maronna et al. 2006). The methods used a type of weighted regression where each observation’s associated weight, between 0 and 1, was calculated using an automated iterative procedure. The procedure objectively identified potential outliers and downweighted them to reduce or eliminate their influence (MM-regression with a bisquare redescending score function; Yohai, 1987). The initial weights were based on a robust estimate of background variation (S-estimator, Rousseeuw and Yohai, 1984).
+
+```{r, eval=TRUE, echo=FALSE, cache=TRUE}
+#################
+## SOURCE: MADBSimResultsCollate.R
+#################
+
+############################ 
+####    PtEst of Density: Location Bias, Visual
+############################
+# Density Estimates Combined
+bwplot(as.factor(Ntransects)~PtEst|factor(time,levels=c("NaDens","NgDens"),labels=c("Animals","Groups")),
+    data=trashLong, subset=time%in%c("NaDens","NgDens"),layout=c(2,1,1),
+    na.rm=TRUE, xlab="MC Estimates",ylab="Transects",main="Density",
+    scales=list(x=list(relation="free")),between=list(x=0.5),
+    panel=function(x,y,...){
+        panel.bpplot(x,y,...);
+        ref<-ifelse(panel.number()==1, 40.3, 1000*521/(SideLength^2))
+        panel.abline(v=ref,lty=2)
+        blah<-matrix(unlist(tapply(x,as.factor(y),range,na.rm=T)),ncol=2,byrow=T)
+        panel.xyplot(c(blah[,1],blah[,2]),c(1:5,1:5),pch=3)
+    }) 
+
+```
+
+The robust MM-type estimator (Yohai 1987, Koller and Stahel 2011) was closer to the known true brown bear population density than standard location estimators (mean, median) (not shown). Similar results held for the group density estimator: the robust MM estimates are reported below for each of the simulation scenarios where the true group density is 24.6 bear groups per 1000 km^2. For the application at hand, the robust estimator provided a location estimate (expected value of the simulations) that was approximately unbiased.
+
+```{r, eval=TRUE, echo=FALSE, results="hide", cache=TRUE}
+#################
+## SOURCE: MADBSimResultsCollate.R
+#################
+
+############## Summary Estimates ##############
+# 3. Monte Carlo estimates of TRUE SAMPLING DISTRIBUTION INFO
+#######################
+# TRUTH: Na Density: 40.3 bears/1000 km^2
+#        Ng Density: (521 groups / 21178 km^2)* 1000 km^2
+#                   24.601
+########################
+
+############################ 
+####    PtEst of Density: Location
+############################
+# mean of MC = E(theta)
+x<-round(tapply(trashLong$PtEst,list(trashLong$Ntransects,trashLong$time),mean,na.rm=T),2)
+#Note: these match those givein in MADBSimResultsCollate.R, 
+# so already incorporated area correction.
+
+# Robust - NaDens
+y<-round(tapply(trashLong$PtEst,list(trashLong$Ntransects,trashLong$time),median,na.rm=T),2)
+
+# MM-type estimators for linear (regression) models.
+w<-round(unique(fitted(lmrob(PtEst~factor(Ntransects),data=trashLong,subset=time=="NaDens"))),2)
+
+dotplot(Ntransects~Est,groups=Method,pch=19,cex=1.2,
+        data=data.frame(Ntransects=rep(dimnames(x)[[1]],3),
+                                              Est=c(x[,4],y[,4],w),
+                                            Method=rep(c("Mean","Median","MM"),c(5,5,5))),
+        panel=function(x,y,...){
+          panel.refline(v=40.3,lty=1,lwd=2,color="black") # add ref line at true density
+          panel.dotplot(x,y,...)
+        }, main="Location Estimators",
+        key=list(x=.8,y=.65,corner=c(0,1),border=TRUE,
+                 text=list(lab=c("Mean","Median","MM"),cex=1.2),
+                 points=list(pch=19,cex=1.2,col=trellis.par.get("superpose.symbol")$col[1:3])))
+```
+
+
+```{r, eval=FALSE, echo=FALSE}
+#################
+## SOURCE: MADBSimResultsCollate.R
+#################
+# Robust - NgDens
+#unique(fitted(lmrob(PtEst~factor(Ntransects),data=trashLong,subset=time=="NgDens")))
+```
+ 
+
+**So we accept as an adequate approximation that the simulated observation process and relatively complicated estimator of density provides unbiased estimates of density that have an approximately Normal sampling distribution.**
+
+**Side Note** Could develop note on bias of estimator. But for now, focus of manuscript is on computational aid.
+
+### Step 2.iii Scale for untransformed
+We modeled how the scale parameter of the sampling distribution changed with sample size and true density, e.g., we developed a *Generalized Variance Function* (Wolter 1985). First, the Monte Carlo approximation to the true sampling variance was calculated from each scenario's simulation and summarized using the 'per unit sampling variance' approach (Kish 1965). This provides a direct model of sampling variance as a function of sample size, for a given true density. The final generalized variance function was developed by extending the per unit sample variance model to account for changes in density. 
+
+#### Step 2.iii.a Summarizing True sampling variance from MC simulations
+To lessen the impact of the extreme simulation results, we used the robust location-free scale estimator $S_n$ in the R package *robustbase* (Maechler et al. 2016) to estimate the sampling variance of each MC scenario's simulation estimates of $\hat{D_{n,d}}$.
+```{r 'Scale Estimates', eval=TRUE, echo=FALSE, results='hide', cache=TRUE}
+#################
+## SOURCE: MADBSimResultsCollate.R
+#################
+
+############################ 
+####    PtEst of Density: Scale
+############################
+# MC SE estimate - directly calculate var(pt estimates)
+#   problem is susceptibility to the few very extreme observations 
+#   (impacting both the mean estimate and the variance)
+x<-tapply(trashLong$PtEst,list(trashLong$Ntransects,trashLong$time),var,na.rm=T)
+
+#NaDens MC Var (NgDens in next code chunk)
+# round(x[,4],2)
+
+#NgDens MC Var
+#round(x[,6],2)
+
+# Robust Scale Sn, alternative to MAD.
+# FROM HELP FILE FOR Sn:
+# "Sn() returns a number, the Sn robust scale estimator, scaled to be consistent for ??^2
+# and i.i.d. Gaussian observations, optionally bias corrected for finite samples."
+#####
+# NOTE: as seen by Sn(rnorm(80,mean=0,sd=10)), Sn() returns an estimate of \sigma.
+# SO WE square it to get est of \sigma^2
+y<-tapply(trashLong$PtEst,list(trashLong$Ntransects,trashLong$time),function(x){
+    s_Sn(x[!is.na(x)])})^2
+#NaDens MC Robust Scale^2 = robust alt to variance
+#round(y[,4],2)
+
+#NgDens MC Robust Scale^2 = robust alt to variance
+#round(y[,6],2)
+
+#Create data frame for displaying in table
+
+dotplot(as.factor(Ntransects)~Est|Target,groups=Estimator,pch=19,cex=1.2,
+        data=data.frame(Ntransects=seq(800,1600,200),
+                        Est=c(x[,4],y[,4],x[,6],y[,6]),
+                        Target=rep(c("Na","Ng"),c(10,10)),
+                        Estimator=rep(rep(c("Var","Sn^2"),c(5,5)),2)),
+        panel=function(x,y,...) panel.dotplot(x,y,...), main="Scale Estimators",
+        xlab="Estimates", ylab="Ntransects",
+        between=list(x=c(2)),scales=list(x=list(relation="free")),
+        key=list(x=.8,y=.65,corner=c(0,1),border=TRUE,
+                 text=list(lab=c("Var","Sn^2"),cex=1.2),
+                 points=list(pch=19,cex=1.2,col=trellis.par.get("superpose.symbol")$col[2:1]))
+        )
+
+```
+
+#### Step 2.iii.b Per Unit Variances
+Kish (1965) introduced the *per unit variance* as a simple approximation of the expected variance of an estimator of a sample mean for a given survey design and sample size for when one had a variance estimate for the sample mean from that design at a different sample size (e.g., from a previous survey). He noted that design-based variance estimators share a common form of $Var(\bar{y})=\frac{1-f}{n}S^2_g$, where $1-f$ is the finite population correction, $n$ is the sample size of primary sample units (here, number of transects), and $S^2_g$ is the *unit variance* of a single primary selection (see Kish 1965 Ch. 8 for examples). He proposed approximating the variance of the estimator at any other sample size $m$ by (i) calculating the observed *unit variance* from the available survey, $\hat{S}^2_{g(n)}=\hat{S^2_n}(\hat{D}_{n,d=40.3})*(n)$, then (ii) plugging that in to the general variance form with the new sample size $m$, $Var(\bar{y}_m)=\frac{1-f}{m}\hat{S}^2_{g(n)}$.      
+
+In our application it was appropriate to ignore the finite population correction factor (e.g., $1-f = 1$). Each set of MC simulated density estimates for a sample size of n transects and true density of '40.3 bears per 1000 km^2' provided an estimate of the per unit variance: $\hat{S}^2_{g(n)}=\hat{S^2_n}(\hat{D}_{n,d=40.3})*(n)$, for n = 800, 1000, ..., 16000. The mean of these provided an overall estimate of per unit variance to employ in approximating the expected sampling variance at any other number of transects.
+
+The per unit variance provided a more than adequate method of approximating the sampling variance for any sample size (figure below).
+```{r 'Per Unit Variances', eval=TRUE, echo=FALSE, cache=TRUE}
+#################
+## SOURCE: recreated from MADBprunitSamplingVar.R
+#################
+
+# WHY NOT SHOWING UP IN PREVIEW?
+
+############################ 
+####    PtEst of Density: Scale
+############################
+# using robust estimate of scale from code chunk above, 
+# calculate and visually assess the performance of the 
+# mean (across transect sample sizes) per unit variance
+###########################
+
+# Robust Scale Sn, alternative to MAD.
+# FROM HELP FILE FOR Sn:
+# "Sn() returns a number, the Sn robust scale estimator, scaled to be consistent for ??^2
+# and i.i.d. Gaussian observations, optionally bias corrected for finite samples."
+#####
+# NOTE: as seen by Sn(rnorm(80,mean=0,sd=10)), Sn() returns an estimate of \sigma.
+# SO WE square it to get est of \sigma^2
+y<-tapply(trashLong$PtEst,list(trashLong$Ntransects,trashLong$time),function(x){
+    s_Sn(x[!is.na(x)])})^2
+#NaDens MC Robust Scale^2 is y[,4]
+#NgDens is y[,6]
+
+# plot of per unit variances and overall mean
+# mean(y[,4]*seq(800,1600,200))
+# $\bar{\hat{S^2_{g(n)}}} = 37348.06
+plot(seq(750,1650,10), mean(y[,4]*seq(800,1600,200))/seq(750,1650,10),lwd=2,type="l",
+     xlab="# Transects",main="Per Unit Approximation to Sampling Variances (Na)",ylab="Sampling Variance")
+points(seq(800,1600,200),y[,4],cex=1.2)
+
+```
+
+#### Step 2.iii.c Modeling how Per Unit Variance changes with brown bear density
+The final step in formulating the generalized variance function for the scale parameter of the sampling distribution of the density estimator was to model how the per unit variance changed with the underlying true density. This was done in two steps: limited simulations were conducted at other brown bear densities and the per unit variance was calculated for each scenario, then a simple linear model was used to characterize change in per unit variance with brown bear density.
+
+```{r 'Location GVF Development', eval=TRUE, echo=FALSE, results='asis', cache=TRUE}
+#################
+## SOURCE: recreated from MADBprunitSamplingVar.R
+#################
+
+############################ 
+####    PtEst of Density: Scale
+############################
+# using robust estimate of scale from code chunk 'Scale Estimates', 
+# model how per unit variance changes with underlying density
+###########################
+
+##### Scale - Robust (from Density scenarios)
+# FROM HELP FILE FOR Sn:
+# "Sn() returns a number, the Sn robust scale estimator, scaled to be consistent for ??^2
+# and i.i.d. Gaussian observations, optionally bias corrected for finite samples."
+#####
+# NOTE: as seen by Sn(rnorm(80,mean=0,sd=10)), Sn() returns an estimate of \sigma.
+# SO WE square it to get est of \sigma^2
+y2<-tapply(trashDensLong$PtEst,list(trashDensLong$Dens,trashDensLong$time),function(x){
+    s_Sn(x[!is.na(x)])})^2
+
+# per Unit  y2[,c(4,6)]*1000
+#        NaDens    NgDens
+#20    26913.90  9169.309
+#40.3  39411.24 11472.334
+#80    79366.67 22094.101
+#160  172778.52 54862.922
+
+##### Robust Scale from Density = 40.3 scenarios at different sample sizes
+#####
+# NOTE: as seen by Sn(rnorm(80,mean=0,sd=10)), Sn() returns an estimate of \sigma.
+# SO WE square it to get est of \sigma^2
+y<-tapply(trashLong$PtEst,list(trashLong$Ntransects,trashLong$time),function(x){
+    s_Sn(x[!is.na(x)])})^2
+#NaDens MC Robust Scale^2 is y[,4]; NgDens is y[,6]
+
+##############
+#DECISION: replace Dens 40.3 with average of Ntransect-specific per unit variances?
+# NaDens: 
+# $\bar{\hat{S^2_{g(n)}}} = mean(y[,4]*seq(800,1600,200)) = 37348.06
+# $\hat{S^2_{g(n=1000)}}  = y2[2,4]*1000                  = 39411.24;
+###############
+# Visual assessment:
+if (0) {
+  library(latticeExtra) # for layer()
+  x<-y2[,c(4,6)]*1000
+  trashperUnit<-data.frame(Dens=c(20,40.3,80,160),VarNaDens=c(x[,1]),VarNgDens=c(x[,2]))
+
+  # plot per units from just n=1000 sims
+  xyplot(VarNaDens~Dens,data=trashperUnit,type=c("g","b","r"),lwd=2)+
+    # add point & regression using mean per unit from Dens = 40.3 sims
+    layer(panel.points(x=40.3,y=37348.06,pch=19,col="blue")) +
+    layer(panel.lmline(x,y=c(y[1],37348.06,y[3:4]),col="red",lwd=2))
+}
+######## Conclusion: 
+# No  impact on regression, stick w/ just n=1000 sims for simplicity
+#########
+
+############################### 
+## 4. interpolation formulas, graphs, Model change in 'per unit' with true density
+############################### 
+x<-y2[,c(4,6)]*1000
+#        NaDens    NgDens
+#20    26913.90  9169.309
+#40.3  39411.24 11472.334
+#80    79366.67 22094.101
+#160  172778.52 54862.922
+
+trashperUnit<-data.frame(Dens=c(20,40.3,80,160),VarNaDens=c(x[,1]),VarNgDens=c(x[,2]))
+
+xyplot(VarNaDens~Dens,data=trashperUnit,type=c("g","b","r"),lwd=2, main="VarNaDens~Dens")
+
+xyplot(log(VarNaDens)~Dens,data=trashperUnit,type=c("g","b","r"), main="log(VarNaDens)~Dens")
+
+library(MASS)
+boxcox(VarNaDens~Dens,data=trashperUnit,lambda=seq(0.65,.66,length=10)) #.655
+
+xyplot(VarNaDens^.655~Dens,data=trashperUnit,type=c("g","b","r"))
+
+summary(lm(VarNaDens^.655~Dens,data=trashperUnit))
+#Coefficients:
+#            Estimate Std. Error t value Pr(>|t|)    
+#(Intercept) 504.7332    25.7392   19.61 0.002590 ** 
+#Dens         13.7064     0.2791   49.11 0.000414 ***
+#---
+#Signif. codes:  0 ?***? 0.001 ?**? 0.01 ?*? 0.05 ?.? 0.1 ? ? 1 
+#Residual standard error: 29.9 on 2 degrees of freedom
+#Multiple R-squared: 0.9992,     Adjusted R-squared: 0.9988 
+#F-statistic:  2412 on 1 and 2 DF,  p-value: 0.0004143 
+# Just use SQUARE ROOT
+#summary(lm(sqrt(VarNaDens)~Dens,data=trashperUnit))
+#             Estimate Std. Error t value Pr(>|t|)   
+#(Intercept) 129.28916    5.58684   23.14  0.00186 **
+#Dens          1.80755    0.06058   29.84  0.00112 **
+
+#Residual standard error: 6.49 on 2 degrees of freedom
+#Multiple R-squared: 0.9978,     Adjusted R-squared: 0.9966 
+#F-statistic: 890.4 on 1 and 2 DF,  p-value: 0.001121 
+
+### NgDens
+summary(lm(sqrt(VarNgDens)~Dens,data=trashperUnit))
+#            Estimate Std. Error t value Pr(>|t|)   
+#(Intercept) 70.40167    4.46451   15.77  0.00400 **
+#Dens         1.01275    0.04841   20.92  0.00228 **
+#Residual standard error: 5.186 on 2 degrees of freedom
+#Multiple R-squared: 0.9955,     Adjusted R-squared: 0.9932 
+#F-statistic: 437.7 on 1 and 2 DF,  p-value: 0.002277 
+
+# both densities
+xyplot(sqrt(perunit)~Dens|Outcome,
+    data=data.frame(Dens=c(trashperUnit$Dens,trashperUnit$Dens),
+        perunit=c(trashperUnit$VarNaDens,trashperUnit$VarNgDens),
+        Outcome=rep(c("Density of Animals","Density of Groups"),c(4,4))),
+    type=c("g","b","r"),layout=c(2,1,1),lwd=2,pch=19,cex=1.5,
+    xlab="True Animal Density",ylab="sqrt(Per Unit Var)",
+    main="(True) Per Unit Sampling Variances from MC sims")
+```
+Initial GVF model development revealed a nonlinear structure to the relationship between per unit variance and brown bear density. A Box-Cox power transformation (*boxcox* from the R package MASS (Ripley et al. 2015)) lead to the square-root transformation of the response variable, which was found to be adequate (figure below).  The final GVFs for the density of brown bears took the form: $$\hat{Var}(\hat{\theta}|n,\theta)=\frac{(\beta_0+\beta_1*\theta)^2}{n}$$, similarly for the density of groups of brown bears (though with different estimates of $\beta_0$ and $\beta_1$).
+```{r 'Location GVF Param Estimates', eval=TRUE, echo=FALSE, results='asis', cache=TRUE}
+#################
+## SOURCE: recreated from MADBprunitSamplingVar.R
+#################
+
+############################ 
+####    PtEst of Density: Scale
+############################
+# using robust estimate of scale from code chunk 'Scale Estimates', 
+# model how per unit variance changes with underlying density
+###########################
+
+##### Scale - Robust (from Density scenarios)
+y2<-tapply(trashDensLong$PtEst,list(trashDensLong$Dens,trashDensLong$time),function(x){
+    s_Sn(x[!is.na(x)])})^2
+
+# per Unit  y2[,c(4,6)]*1000
+#        NaDens    NgDens
+#20    26913.90  9169.309
+#40.3  39411.24 11472.334
+#80    79366.67 22094.101
+#160  172778.52 54862.922
+
+##### Robust Scale from Density = 40.3 scenarios at different sample sizes
+y<-tapply(trashLong$PtEst,list(trashLong$Ntransects,trashLong$time),function(x){
+    s_Sn(x[!is.na(x)])})^2
+#NaDens MC Robust Scale^2 is y[,4]; NgDens is y[,6]
+
+##############
+#DECISION: replace Dens 40.3 with average of Ntransect-specific per unit variances?
+# NaDens: 
+# $\bar{\hat{S^2_{g(n)}}} = mean(y[,4]*seq(800,1600,200)) = 37348.06
+# $\hat{S^2_{g(n=1000)}}  = y2[2,4]*1000                  = 39411.24;
+###############
+
+############################### 
+## 4. interpolation formulas, graphs, Model change in 'per unit' with true density
+############################### 
+x<-y2[,c(4,6)]*1000
+#        NaDens    NgDens
+#20    26913.90  9169.309
+#40.3  39411.24 11472.334
+#80    79366.67 22094.101
+#160  172778.52 54862.922
+
+trashperUnit<-data.frame(Dens=c(20,40.3,80,160),VarNaDens=c(x[,1]),VarNgDens=c(x[,2]))
+
+### NaDens
+summary(lm(sqrt(VarNaDens)~Dens,data=trashperUnit))
+#             Estimate Std. Error t value Pr(>|t|)   
+#(Intercept) 129.28916    5.58684   23.14  0.00186 **
+#Dens          1.80755    0.06058   29.84  0.00112 **
+#
+#Residual standard error: 6.49 on 2 degrees of freedom
+#Multiple R-squared:  0.9978,	Adjusted R-squared:  0.9966 
+# F-statistic: 890.4 on 1 and 2 DF,  p-value: 0.001121 
+
+### NgDens
+summary(lm(sqrt(VarNgDens)~Dens,data=trashperUnit))
+#            Estimate Std. Error t value Pr(>|t|)   
+#(Intercept) 70.40167    4.46451   15.77  0.00400 **
+#Dens         1.01275    0.04841   20.92  0.00228 **
+#Residual standard error: 5.186 on 2 degrees of freedom
+#Multiple R-squared: 0.9955,     Adjusted R-squared: 0.9932 
+#F-statistic: 437.7 on 1 and 2 DF,  p-value: 0.002277 
+
+# both densities
+xyplot(sqrt(perunit)~Dens|Outcome,
+    data=data.frame(Dens=c(trashperUnit$Dens,trashperUnit$Dens),
+        perunit=c(trashperUnit$VarNaDens,trashperUnit$VarNgDens),
+        Outcome=rep(c("Density of Animals","Density of Groups"),c(4,4))),
+    type=c("g","b","r"),layout=c(2,1,1),lwd=2,pch=19,cex=1.5,
+    xlab="True Animal Density",ylab="sqrt(Per Unit Var)",
+    main="(True) Per Unit Sampling Variances from MC sims")
+```
+
+### Step 2.iiii Putting it together for unstransformed
+Rather than conduct extensive simulations for each scenario of interest (sample size, true brown bear density) to assess the impact on the sampling distribution of $\hat{D}_{n,density=\theta}$, it is adequate to simply generate draws from the analytical approximation
+$$\hat{D}_{n,density=\theta}=Normal(\theta,\frac{(\beta_0+\beta_1*\theta)^2}{n})$$.
+
+**INSERT TABLE OF COEFFICIENT ESTIMATES FOR Brown Bears & Groups**
+
+
+### Step 2.v Box-Cox transformation to improve approximation?
+Given the somewhat poor ability of the normal distribution to capture the thickness of the right tail of the simulation density estimates, simple Box-Cox transformations (REF) were investigated as a possible beneficial approach. Using the XXXX package (REF).
+
+```{r 'Box-Cox for hat{D}', eval=TRUE, echo=FALSE, cache=TRUE,fig.width=5,fig.height=5}
+######################
+## 2017 Sept 13, using packages MASS and car
+######################
+# joel_reynolds@nps.gov
+######################
+# 1. Fit BC for each Ntransects scenario: D~theta
+# 2. assess common BC transformation - feasible
+# 3. calculate (robust) per unit on transformed
+# 4. model change in per unit as function theta (GVF)
+# 5. Put it all together, assess (qqnorm)
+#######################
+# last edit 11/28/17 STOPPED
+#####################################
+
+######################
+# 1. Fit BC for each Ntransects scenario: D~theta
+# because var changes with Ntransects, do separately
+# (could possibly model directly w/ lmer....)
+#######################
+
+# Store results (lambda + 95% CI)
+BoxCoxDhat<-data.frame(Ntransects=seq(800,1600,200),
+                       Best = NA,Lower95CI=NA, Upper95CI=NA)
+  
+####### n=800 transects
+# index to subset out PtEst(NaDens) for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+DATA<-trashLong[Index,] # extract subset
+
+#boxcox(lm(PtEst~1, offset=rep(40.3,length(DATA$PtEst)),data=DATA),lambda=seq(-2,2,.1), plotit=TRUE)
+bc<-boxcox(lm(PtEst~1, offset=rep(40.3,length(DATA$PtEst)),data=DATA),lambda=seq(-.9,.1,.025), plotit=TRUE)
+# best at -0.35ish, but really -0.75, 0.05
+
+# visually check performance
+Dhatn800bc<-lmrob(PtEst^-0.35~1,offset=rep(40.3,length(DATA$PtEst)),data=DATA)
+summary(Dhatn800bc)
+plot(Dhatn800bc)
+# looks great (better than before)
+
+#Save it
+BoxCoxDhat[1,2:4]<- c(bc$x[which.max(bc$y)],range(bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95,1)]))
+
+
+####### n=1000 transects
+# index to subset out PtEst(NaDens) for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1000)
+DATA<-trashLong[Index,] # extract subset
+
+#boxcox(lm(PtEst~1, offset=rep(40.3,length(DATA$PtEst)),data=DATA),lambda=seq(-2,2,.1), plotit=TRUE)
+bc<-boxcox(lm(PtEst~1, offset=rep(40.3,length(DATA$PtEst)),data=DATA),lambda=seq(-1.6,-0.6,.025), plotit=TRUE)
+# best at -01.05ish, but really -1.4, -0.75
+Dhatn1000bc<-lmrob(PtEst^-1.05~1,offset=rep(40.3,length(DATA$PtEst)),data=DATA)
+summary(Dhatn1000bc)
+plot(Dhatn1000bc)
+# looks great (better than before)
+
+#Save it
+BoxCoxDhat[2,2:4]<- c(bc$x[which.max(bc$y)],range(bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95,1)]))
+
+
+####### n=1200 transects
+# index to subset out PtEst(NaDens) for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1200)
+DATA<-trashLong[Index,] # extract subset
+
+#boxcox(lm(PtEst~1, offset=rep(40.3,length(DATA$PtEst)),data=DATA),lambda=seq(-2,2,.1), plotit=TRUE)
+bc<-boxcox(lm(PtEst~1, offset=rep(40.3,length(DATA$PtEst)),data=DATA),lambda=seq(-1.6,-0.7,.025), plotit=TRUE)
+# best at -01.15ish, but really -1.55, -0.78
+Dhatn1200bc<-lmrob(PtEst^-1.15~1,offset=rep(40.3,length(DATA$PtEst)),data=DATA)
+summary(Dhatn1200bc)
+plot(Dhatn1200bc)
+# looks great (better than before)
+
+#Save it
+BoxCoxDhat[3,2:4]<- c(bc$x[which.max(bc$y)],range(bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95,1)]))
+
+####### n=1400 transects
+# index to subset out PtEst(NaDens) for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1400)
+DATA<-trashLong[Index,] # extract subset
+
+#boxcox(lm(PtEst~1, offset=rep(40.3,length(DATA$PtEst)),data=DATA),lambda=seq(-2,2,.1), plotit=TRUE)
+bc<-boxcox(lm(PtEst~1, offset=rep(40.3,length(DATA$PtEst)),data=DATA),lambda=seq(-0.8,0.25,.025), plotit=TRUE)
+# best at -0.3ish, but really -0.77, 0.18
+Dhatn1400bc<-lmrob(PtEst^-0.3~1,offset=rep(40.3,length(DATA$PtEst)),data=DATA)
+summary(Dhatn1400bc)
+plot(Dhatn1400bc)
+# looks great (better than before)
+
+#Save it
+BoxCoxDhat[4,2:4]<- c(bc$x[which.max(bc$y)],range(bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95,1)]))
+
+####### n=1600 transects
+# index to subset out PtEst(NaDens) for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1600)
+DATA<-trashLong[Index,] # extract subset
+
+#boxcox(lm(PtEst~1, offset=rep(40.3,length(DATA$PtEst)),data=DATA),lambda=seq(-2,2,.1), plotit=TRUE)
+bc<-boxcox(lm(PtEst~1, offset=rep(40.3,length(DATA$PtEst)),data=DATA),lambda=seq(-1.5,-0.3,.025), plotit=TRUE)
+# best at -0.93ish, but really -1.4, -0.4
+Dhatn1600bc<-lmrob(PtEst^-0.9~1,offset=rep(40.3,length(DATA$PtEst)),data=DATA)
+summary(Dhatn1600bc)
+plot(Dhatn1600bc)
+# looks great (better than before)
+
+#Save it
+BoxCoxDhat[5,2:4]<- c(bc$x[which.max(bc$y)],range(bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95,1)]))
+
+
+#####################################################
+## what does it look like for D-hat from other scenarios?
+#####################################################
+
+
+
+
+
+######################
+# 2. assess common BC transformation - feasible
+#######################
+ggplot(BoxCoxDhat, aes(Ntransects, Best)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = Lower95CI, ymax = Upper95CI)) +
+    labs(x = "Ntransects",
+         y = "Lambda",
+         title = "Box-Cox transformations for hat{D}, w/ 95% CI") +
+    theme_classic() 
+
+######################
+# 3. calculate (robust) per unit on transformed
+#######################
+
+######################
+# 4. model change in per unit as function theta (GVF)
+#######################
+
+######################
+# 5. Put it all together, assess (qqnorm)
+#######################
+
+```
+
+
+```{r 'Box-Cox for hat{SE}(hat{D})|hat{D}', eval=TRUE, echo=FALSE, cache=TRUE,fig.width=5,fig.height=5}
+######################
+## 2017 Nov 28, using packages MASS and car
+######################
+# joel_reynolds@nps.gov
+######################
+# 1. Fit BC for each Ntransects scenario: SE(D-hat)~(Dhat-Theta)/SEofDhatfromperunit
+# 2. assess common BC transformation - feasible?
+# 3. calculate (robust) per unit on transformed
+# 4. model change in per unit as function theta (GVF)
+# 5. Put it all together, assess (qqnorm)
+#######################
+# last edit 11/28/17
+#####################################
+
+######################
+# 1. Fit BC for each Ntransects scenario: SE(D-hat)~(Dhat-Theta)/SEofDhatfromperunit
+#  Note: this accounts for covariance between D-hat and SE-hat & employs GVF of SEofDhat to
+# account for var changes with Ntransects
+#######################
+
+# Store results (lambda + 95% CI)
+BoxCoxSEhat<-data.frame(Ntransects=seq(800,1600,200),
+                       Best = NA,Lower95CI=NA, Upper95CI=NA)
+  
+#####################################################
+## what does it look like for SE-hat adjusted for D-hat?
+#####################################################
+####### n=800 transects
+# index to subset out PtEst(NaDens) for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+DATA<-trashLong[Index,] # extract subset
+
+#boxcox(lm(SE~I((PtEst-40.3)/SEofDhatfromperunit), data=DATA),lambda=seq(-2,2,.1), plotit=TRUE)
+bc<-boxcox(lm(SE~I((PtEst-40.3)/SEofDhatfromperunit), data=DATA),lambda=seq(-1.2,-0.75,.025), plotit=TRUE)
+# best at -0.9ish, but really -1.1, -0.75
+#SEhatn800bc<-lmrob(SE^-0.9~I((PtEst-40.3)/SEofDhatfromperunit),data=DATA)
+#summary(SEhatn800bc)
+#plot(SEhatn800bc)
+# looks decent (better than before)
+
+#Save it
+BoxCoxSEhat[1,2:4]<- c(bc$x[which.max(bc$y)],range(bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95,1)]))
+
+####### n=1000 transects
+# index to subset out PtEst(NaDens) for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1000)
+DATA<-trashLong[Index,] # extract subset
+
+#boxcox(lm(SE~I((PtEst-40.3)/SEofDhatfromperunit), data=DATA),lambda=seq(-2,2,.1), plotit=TRUE)
+bc<-boxcox(lm(SE~I((PtEst-40.3)/SEofDhatfromperunit), data=DATA),lambda=seq(-1.2,-0.2,.025), plotit=TRUE)
+# best at -0.45ish, but really -0.65, -0.30
+#SEhatn1000bc<-lmrob(SE^-0.45~I((PtEst-40.3)/SEofDhatfromperunit),data=DATA)
+#summary(SEhatn1000bc)
+#plot(SEhatn1000bc)
+# looks decent (better than before)
+
+#Save it
+BoxCoxSEhat[2,2:4]<- c(bc$x[which.max(bc$y)],range(bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95,1)]))
+
+####### n=1200 transects
+# index to subset out PtEst(NaDens) for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1200)
+DATA<-trashLong[Index,] # extract subset
+
+#boxcox(lm(SE~I((PtEst-40.3)/SEofDhatfromperunit), data=DATA),lambda=seq(-2,2,.1), plotit=TRUE)
+bc<- boxcox(lm(SE~I((PtEst-40.3)/SEofDhatfromperunit), data=DATA),lambda=seq(-1.2,-0.2,.025), plotit=TRUE)
+# best at -0.6ish, but really -0.85, -0.37
+#SEhatn1200bc<-lmrob(SE^-0.6~I((PtEst-40.3)/SEofDhatfromperunit),data=DATA)
+#summary(SEhatn1200bc)
+#plot(SEhatn1200bc)
+# looks decent (better than before)
+
+#Save it
+BoxCoxSEhat[3,2:4]<- c(bc$x[which.max(bc$y)],range(bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95,1)]))
+
+
+####### n=1400 transects
+# index to subset out PtEst(NaDens) for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1400)
+DATA<-trashLong[Index,] # extract subset
+
+#boxcox(lm(SE~I((PtEst-40.3)/SEofDhatfromperunit), data=DATA),lambda=seq(-2,2,.1), plotit=TRUE)
+bc<-boxcox(lm(SE~I((PtEst-40.3)/SEofDhatfromperunit), data=DATA),lambda=seq(-1.3,-0.7,.025), plotit=TRUE)
+# best at -1.05ish, but really -1.25, -0.85
+#SEhatn1400bc<-lmrob(SE^-1.05~I((PtEst-40.3)/SEofDhatfromperunit),data=DATA)
+#summary(SEhatn1400bc)
+#plot(SEhatn1400bc)
+# looks very good (better than before)
+
+#Save it
+BoxCoxSEhat[4,2:4]<- c(bc$x[which.max(bc$y)],range(bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95,1)]))
+
+
+####### n=1600 transects
+# index to subset out PtEst(NaDens) for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1600)
+DATA<-trashLong[Index,] # extract subset
+
+#boxcox(lm(SE~I((PtEst-40.3)/SEofDhatfromperunit), data=DATA),lambda=seq(-2,2,.1), plotit=TRUE)
+bc<-boxcox(lm(SE~I((PtEst-40.3)/SEofDhatfromperunit), data=DATA),lambda=seq(-1.4,-0.9,.025), plotit=TRUE)
+# best at -1.16ish, but really -1.38, -0.95
+#SEhatn1600bc<-lmrob(SE^-1.15~I((PtEst-40.3)/SEofDhatfromperunit),data=DATA)
+#summary(SEhatn1600bc)
+#plot(SEhatn1600bc)
+# looks great (better than before)
+
+#Save it
+BoxCoxSEhat[5,2:4]<- c(bc$x[which.max(bc$y)],range(bc$x[bc$y > max(bc$y) - 1/2 * qchisq(.95,1)]))
+
+
+######################
+# 2. assess common BC transformation - feasible?
+#######################
+ggplot(BoxCoxSEhat, aes(Ntransects, Best)) +
+    geom_point() +
+    geom_errorbar(aes(ymin = Lower95CI, ymax = Upper95CI)) +
+    labs(x = "Ntransects",
+         y = "Lambda",
+         title = "Box-Cox transformations for hat{SE}(hat{D})|hat{D}, w/ 95% CI") +
+    theme_classic() 
+
+######################
+# 3. calculate (robust) per unit on transformed
+#######################
+
+######################
+# 4. model change in per unit as function theta (GVF)
+#######################
+
+######################
+# 5. Put it all together, assess (qqnorm)
+#######################
+
+
+# n = 800
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+
+#Ntransect settings
+Index<-seq(800,1600,200) 
+#Extract results for specific Ntransects setting
+i<-1 #scenario index
+blah<-trashLong[trashLong$Ntransects==Index[i],]
+# Extract NaDens
+blah<-blah$PtEst[blah$time=="NaDens"]
+#  gaussian - qqplot, but now showing in the line up
+result <- qqtest(blah, dist="normal", lineup=FALSE, 
+                 main=paste(Index[i]," Transects"), legend=FALSE,nreps=100,
+                 cex=0.75, col="grey20", ylab="", pch=21,xAxisAsProbs = TRUE,
+                 yAxisAsProbs=TRUE,
+                 xAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)),                                      yAxisProbs=c(seq(.75,.95,.05),seq(.96,.99,.01)))
+#abline(v=qnorm(c(seq(.75,.95,.05),seq(.96,.99,.01))))
+abline(h=quantile(blah,probs=c(seq(.75,.95,.05),seq(.96,.99,.01))))
+```
+
+## Step 3. Analytical Approximation to MC sampling distribution of $\hat{Var}(\hat{D}_{n,\theta})$, for brown bear density D and sample size n ('NaDens')
+A similar process was followed to develop the analytical approximation for the sampling distribution of the estimator $\hat{SE}$ for any sample size $n$ and brown bear density.  However, not surprisingly there is a dependence of $\hat{SE}$ on $\hat{D}$ (as revealed by Spearman's rho values of approximately 0.78 for any simulation scenario).  Thus the approximation will depend not only on sample size and true brown bear density, but additionally the density estimate: $\hat{SE}(\hat{D}_{n,\theta}) \sim F(\gamma(\hat{D}_{n,\theta},n,\theta),\xi(\hat{D}_{n,\theta},n,\theta),\dots)$.  
+
+```{r 'Dependence between D and SE(D)', eval=FALSE, echo=FALSE, cache=TRUE}
+# assess dependence among \hat{D} and \hat{SE(\hat{D})}
+xyplot(SE~PtEst|Ntransects, data=trashLong, subset=trashLong$time=="NaDens",
+       xlab="Density Est.", ylab="SE Est.")
+
+toss<-tapply(seq(along=trashLong$Ntransects),INDEX=trashLong$Ntransects,
+       FUN=function(index){ 
+         c(Pear=cor(trashLong$PtEst[index],trashLong$SE[index]),
+           Spear=cor(trashLong$PtEst[index],trashLong$SE[index],method="spear"))})
+# for any setting of Ntransects, Spearman's rho ~ 0.78
+```
+
+
+### Step 3.i Shape
+UPDATE and TIGHTEN
+Recalling that the fundamental objective of this effort is to improve resource decision making by speeding up the assessment of tradeoffs among survey / monitoring design decisions, one must continually weigh the expected benefits from more in depth development of better performing approximations against the time spent developing the approximation rather than applying it in the simulation study. With that in mind, we illustrate and compare two strategies: (i) a simple strategy that ignores any covariance between $\hat{SE}$ and $\hat{D}$ and approximates the skewness of the MC sampling distribution of $\hat{SE}$ by a log-normal distribution (a la Reynolds et al. 2011), and (ii) [MODIFY] a more accurate approximation that incorporates the postive covariance between $\hat{SE}$ and $\hat{D}$ values from the same simulation but still assumes a log-normal distribution. Considering the joint distribution of the bivariate observation ($\hat{D}$,$log(\hat{SE})$), the former strategy assumes these follow bivariate normal distribution with diagonal variance-covariance matrix, the latter allows for a general variance-covariance matrix. Finally, consideration is given to other transformations for improving the approximation of the sampling distribution of the, perhaps transformed, $\hat{SE}$.
+
+More flexible distributions could be considered (e.g., broader Pearson Family REF), but at increased time devoted to the approximation analysis rather than the implementation of the approximations. Discuss issue of 'hyper parameter' identifiability, monotonic trend (as minimum functional relationship) with Ntransects, IDing type based on mle but undue influence of extreme observations, (weighted mles?), etc.
+
+**Fundamental issue of time-costs of identifying a better fitting analytical approximations vs running simulations. E.g., allocation of effort to analytical approx vs 'power analysis' simulations? The relevant criteria, really is impact on general estimation of required effort levels for monitoring to meet information quality and guide decisions.  Given all the other sources of variation not accounted for in the simulations, is coming up with an analytical approximation that does well fitting the 'bulk' of the distribution mass adequate? E.g., sensitivity of overall simulation study results to these distributional tails? Note accounting for cov accounts for at least (.78)^2 60% of var in log(SE-hat) - see Spearman's below.**
+
+**Aside to explore later: Email Peter, Galen, Michael, Jon, tamre - any theory on shape of SE estimates sampling distr for H-T-like estimators?**
+
+
+### Step 3.i.a Shape: assume Log-normal
+The robust estimation methods described above were applied to the natural logarithm of the standard error estimates from each scenario.
+
+[note: original wanderings included chi-sq, gamma, beta, ....]
+
+```{r "log(SE) Shape Assessment", eval=TRUE, echo=FALSE, cache=TRUE, warning=TRUE}
+##########################################################
+## FROM: MADBDensSESamplingDist.R
+## Robust estimation of Log-normal (location & scale), visual assess adequacy of distribution.
+# Use of Robust Optimal Estimation, roptest(), from package ROptEst (Kohl, Pupashenko, Kroisandt, & Ruckdeschel 2016)
+# Use of RobAStBase::qqplot
+# Allows for unknown amount of contamination.
+#############################
+# last edit: 2017 July 20 
+##########################################################
+#####
+# 1. Assess for scenarios varying # of transects with Dens 40.3
+#####
+
+# create robust estimation function for use in calls to RobAStBase::qqplot
+# note: original (2009) code dropped most extreme 1% off of each tail 
+# (only used observations [6:495] of the 500 sorted observations)
+# use of ropest() should eliminate need to do that sort of a priori determination.
+
+# n = 800
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+
+qqtest(log(trashLong$SE[Index]), dist = "normal", p=NULL, a=NULL, np=500, type="o",
+ 		  yAxisAsProbs=TRUE, yAxisProbs=c(0.01,0.025,0.05,0.1,.8,.85,.9,.95,.975,.99),
+ 		  ylab="log(Bootstrap SEs)",cex=0.5,
+      xAxisAsProbs=TRUE,
+ 		  xAxisProbs = c(0.01,0.025, 0.050,0.10,.8,.85, 0.90, 0.95, 0.975,0.99),
+      xlab="Normal",main = "log(SE-hat) vs Norm, 800 transects")
+abline(h=quantile(log(trashLong$SE[Index]),
+                  probs=c(seq(.75,.95,.05),seq(.96,.99,.01))))
+
+if (0) {
+ u1<-roptest(x=log(trashLong$SE[Index]),L2Fam=NormLocationScaleFamily(), 
+            eps.upper=0.05,steps = 5,OptOrIter="iterate")
+ #estimate(u1) # for Z = log(x)
+ #     mean        sd 
+ #1.7922449 0.2708314 
+  if (0) {
+    qqnorm(log(trashLong$SE[Index]))
+    qqline(log(trashLong$SE[Index]))}
+
+ # use qqplot from RobAstBase
+ qqplot(log(trashLong$SE[Index]), u1,xlab="n=800",main="SE-hat vs Log-Norm")
+ # really not very good?
+}
+#####################
+# n = 1000
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1000)
+qqtest(log(trashLong$SE[Index]), dist = "normal", p=NULL, a=NULL, np=500, type="o",
+ 		  yAxisAsProbs=TRUE, yAxisProbs=c(0.01,0.025,0.05,0.1,.8,.85,.9,.95,.975,.99),
+ 		  ylab="log(Bootstrap SEs)",cex=0.5,
+      xAxisAsProbs=TRUE,
+ 		  xAxisProbs = c(0.01,0.025, 0.050,0.10,.8,.85, 0.90, 0.95, 0.975,0.99),
+      xlab="Normal",main = "log(SE-hat) vs Norm, 1000 transects")
+abline(h=quantile(log(trashLong$SE[Index]),
+                  probs=c(seq(.75,.95,.05),seq(.96,.99,.01))))
+if (0) {
+ u2<-roptest(x=log(trashLong$SE[Index]),L2Fam=NormLocationScaleFamily(), 
+            eps.upper=0.05,steps = 5,OptOrIter="iterate")
+ #estimate(u2) # for Z = log(x)
+ #     mean        sd 
+ #1.6927103 0.2663386 
+
+ # use qqplot from RobAstBase
+ qqplot(log(trashLong$SE[Index]), u2,xlab="n=1000",main="SE-hat vs Log-Norm")
+}
+##############
+# n = 1200
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1200)
+qqtest(log(trashLong$SE[Index]), dist = "normal", p=NULL, a=NULL, np=500, type="o",
+ 		  yAxisAsProbs=TRUE, yAxisProbs=c(0.01,0.025,0.05,0.1,.8,.85,.9,.95,.975,.99),
+ 		  ylab="log(Bootstrap SEs)",cex=0.5,
+      xAxisAsProbs=TRUE,
+ 		  xAxisProbs = c(0.01,0.025, 0.050,0.10,.8,.85, 0.90, 0.95, 0.975,0.99),
+      xlab="Normal",main = "log(SE-hat) vs Norm, 1200 transects")
+abline(h=quantile(log(trashLong$SE[Index]),
+                  probs=c(seq(.75,.95,.05),seq(.96,.99,.01))))
+
+if (0) {
+ u3<-roptest(x=log(trashLong$SE[Index]),L2Fam=NormLocationScaleFamily(), 
+            eps.upper=0.05,steps = 5,OptOrIter="iterate")
+ #estimate(u3) # for Z = log(x)
+ #     mean        sd 
+ # 1.5943248 0.2400456
+
+ # use qqplot from RobAstBase
+ qqplot(log(trashLong$SE[Index]), u3,xlab="n=1200",main="SE-hat vs Log-Norm")
+}
+##############
+# n = 1400 
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1400)
+qqtest(log(trashLong$SE[Index]), dist = "normal", p=NULL, a=NULL, np=500, type="o",
+ 		  yAxisAsProbs=TRUE, yAxisProbs=c(0.01,0.025,0.05,0.1,.8,.85,.9,.95,.975,.99),
+ 		  ylab="log(Bootstrap SEs)",cex=0.5,
+      xAxisAsProbs=TRUE,
+ 		  xAxisProbs = c(0.01,0.025, 0.050,0.10,.8,.85, 0.90, 0.95, 0.975,0.99),
+      xlab="Normal",main = "log(SE-hat) vs Norm, 1400 transects")
+abline(h=quantile(log(trashLong$SE[Index]),
+                  probs=c(seq(.75,.95,.05),seq(.96,.99,.01))))
+
+if (0) {
+  u4<-roptest(x=log(trashLong$SE[Index]),L2Fam=NormLocationScaleFamily(), 
+            eps.upper=0.05,steps = 5,OptOrIter="iterate")
+#estimate(u4) # for Z = log(x)
+#     mean        sd 
+# 1.5239627 0.2445654
+
+# use qqplot from RobAstBase
+ qqplot(log(trashLong$SE[Index]), u4,xlab="n=1400",main="SE-hat vs Log-Norm")
+}
+####################
+# n = 1600 
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1600)
+qqtest(log(trashLong$SE[Index]), dist = "normal", p=NULL, a=NULL, np=500, type="o",
+ 		  yAxisAsProbs=TRUE, yAxisProbs=c(0.01,0.025,0.05,0.1,.8,.85,.9,.95,.975,.99),
+ 		  ylab="log(Bootstrap SEs)",cex=0.5,
+      xAxisAsProbs=TRUE,
+ 		  xAxisProbs = c(0.01,0.025, 0.050,0.10,.8,.85, 0.90, 0.95, 0.975,0.99),
+      xlab="Normal",main = "log(SE-hat) vs Norm, 1600 transects")
+abline(h=quantile(log(trashLong$SE[Index]),
+                  probs=c(seq(.75,.95,.05),seq(.96,.99,.01))))
+
+if (0){
+ # alternatively, use robust estimates & qqplot from RobAstBase
+ u5<-roptest(x=log(trashLong$SE[Index]),L2Fam=NormLocationScaleFamily(), 
+            eps.upper=0.05,steps = 5,OptOrIter="iterate")
+ #estimate(u5) # for Z = log(x)
+ #     mean        sd 
+ # 1.4645467 0.2225627
+
+ # use qqplot from RobAstBase
+ qqplot(log(trashLong$SE[Index]), u5,xlab="n=1600",main="SE-hat vs Log-Norm")
+}
+##########################################################
+```
+
+In all of the 'Ntransect' scenarios the log-Normal distribution fits the central bulk of the simulation results but does not fully capture the distribution tails. The smallest values of $log(\hat{SE})$ from the simulations for some scenarios are slightly (arguably negligibly) larger than expected from a log-normal (see Figures, especially scenarios n=1000 transects, for which the smallest 5% of values are slightly larger than expected).  However, the real deficiency is the inability of the log-normal to capture the largest 15-20% of the simulation results, e.g., the right skewness.  
+
+### Step 3.i.b Shape: Box-Cox transformations to improve normality of SEs?
+```{r 'Standardize and Box-Cox hat{SE(hat{D})}', eval=FALSE, echo=FALSE, cache=TRUE}
+###############################
+# 1. Robust estimation of location and scale for SE-hat,
+# 2. location vs per-unit-based est of \sigma_{\hat{D}}?
+# 3. per unit variance model for SE-hat
+# 4. standardize both SE-hat and D-hat
+# 5. common (robust) rho?
+# 6. common bivariate box-cox? across Ntransects
+# 7. allow for fitting approximation model for SE-hat|D-hat=d?
+################################################
+# Last edits 2017 Aug 30 Joel_Reynolds@nps.gov
+################################################
+
+###############################
+# 1. Robust estimation of location and scale for SE-hat,
+# 2. location vs per-unit-based est of \sigma_{\hat{D}}?
+# 3. per unit variance model for SE-hat
+# 4. standardize both SE-hat and D-hat
+# 5. common (robust) rho?
+# 6. common bivariate box-cox? across Ntransects
+# 7. allow for fitting approximation model for SE-hat|D-hat=d?
+################################################
+
+###############################
+# 1. Robust estimation of location and scale for SE-hat,
+################################################
+## SOURCE: MADBSimResultsCollate.R
+#################
+# Robust Location SE-hat- NaDens
+x<-unique(fitted(lmrob(SE~factor(Ntransects),data=trashLong,subset=time=="NaDens")))
+# 5.919582 5.399773 4.958291 4.640671 4.404837
+
+# Robust Scale for SE-hat- NaDens: Sn, alternative to MAD.
+# FROM HELP FILE FOR Sn:
+# "Sn() returns a number, the Sn robust scale estimator, scaled to be consistent for ??^2
+# and i.i.d. Gaussian observations, optionally bias corrected for finite samples."
+#####
+# NOTE: as seen by Sn(rnorm(80,mean=0,sd=10)), Sn() returns an estimate of \sigma.
+# SO WE square it to get est of \sigma^2
+Index<-trashLong$time=="NaDens"
+y<-tapply(trashLong$SE[Index],list(trashLong$Ntransects[Index],trashLong$time[Index]),function(x){
+    s_Sn(x[!is.na(x)])})^2
+# t(y)
+#            800     1000     1200     1400      1600
+# NaDens 2.498393 1.923884 1.241342 1.060205 0.8898093
+
+###############################
+# 2. location vs per-unit-based est of \sigma_{\hat{D}}?
+###############################
+plot((129.29+1.81*40.3)/sqrt(seq(800,1600,200)),x,pty="s",
+     xlab="Direct MC est SE(D-hat)",ylab=expression(paste("Robust location est of  ",hat(SE))))
+abline(0,1,lty=1)
+
+trash<-(129.29+1.81*40.3)/sqrt(seq(800,1600,200))
+summary(lm(x~trash))
+# Coefficients:
+#            Estimate Std. Error t value Pr(>|t|)    
+#(Intercept)  0.69919    0.06401   10.92  0.00164 ** 
+#trash        0.73138    0.01064   68.72 6.79e-06 ***
+#Residual standard error: 0.01764 on 3 degrees of freedom
+#Multiple R-squared:  0.9994,	Adjusted R-squared:  0.9992
+
+#so robust location of Bootstrap is about 0.73 of actual.
+# e.g., bootstrap is underestimating true sampling variability.
+
+###############################
+# 3. per unit variance model for SE-hat
+################################################
+#NaDens: average of Ntransect-specific per unit variances
+# $\bar{\hat{S^2_{g(n)}}} = mean(y*seq(800,1600,200)) = 1664.038
+plot(seq(800,1600,200),y,xlab="Ntransects",ylab="Robust Scale (units^2)",main="SE-hat", pch=19)
+lines(seq(800,1600,10),1664.038/seq(800,1600,10),col="red",lwd=2)
+
+###############################
+# 4. standardize both SE-hat and D-hat
+################################################
+
+
+###############################
+# 5. common (robust) rho?
+################################################
+
+
+###############################
+# 6. common bivariate box-cox? across Ntransects
+################################################
+
+
+###############################
+# 7. allow for fitting approximation model for SE-hat|D-hat=d?
+################################################
+
+```
+
+*Side Note* Turns out that the robust location (e.g., Expected Value) of the Bootstrap SEs for any given scenario is about 0.73 of the true standard error (sampling variation) exhibited by the MC simulations of the density estimates. E.g., bootstrap is underestimating true sampling variability.
+
+*Side Note on Explorations* Applying Box-Cox to just the $\hat{SE}$s for a given scenario is problematic due to need to identify a common transformation applicable across all scenarios (for a given $\theta$) and, possibly,  defining a functional relationship to $\theta$. This would be lessened by, for example, standardizing each scenario's $\hat{SE}$S (using robust estimates of location and scale), then identifying a common transformation. More ideal would be to iterate between transformation estimates and location and scale estimates => standardization given the dependence between the two steps.
+
+### Step 3.i.c Shape: MV Box-Cox transformations to improve multivariate normality of $(\hat{D},\hat{SE})| n, \theta$?
+Transforming just $\hat{SE}$ and not $\hat{D}$ is inconsistent, forcing one to consider application of multivariate box-cox transformations for MVN (Reference - Fox?). This is a black-box application, more or else, and better than just assuming $\hat{SE} \sim log-normal$ as it is (i) more flexible and general strategy (ii) incorporates $\hat{D}s$, and properly accounts for the joint distribution of the bivariate outcomes.
+
+```{r 'MV Box-Cox for (hat{D},hat{SE(hat{D})})', eval=FALSE, echo=FALSE, cache=TRUE}
+###############################
+# 1. mv boxCox (package CAR) to each scenario
+# 2. compare resulting transformations - 
+# 3. Resolve need for standardization & iteration...
+# 3.b common (robust) rho?
+# 3.c monotonic pattern w/ Ntransects?
+# 4. apply common mv boxCox to all scenarios for given \theta
+# 5. repeat remaining steps from above for modeling g_1(D)... per unit, etc.
+# 6. model g_2(SE)|g_1(D) each scenario
+# 7. ?Robust? estimation of location and scale for g_2(SE)|g_1(D),
+# 8. per unit variance model or other direct modeling of res variance?
+# 9. model relevant MVN location/scale for \theta
+################################################
+# Last edits 2017 Sept 7 Joel_Reynolds@nps.gov
+################################################
+
+###############################
+# 0. univariate box-cox on {D, SE|D}  to each scenario
+################################################
+
+
+###############################
+# 1. mv box-cox on (D,SE) to each scenario
+################################################
+# MV Box-Cox - car::powerTransform
+# =>> really care about MVN of (\hat{D},\hat{SE}|\hat{D})
+
+# Index to extract scenario of interest
+Index<-trashLong$time=="NaDens" ### FINISH
+
+# modify input to reflect desired focus: (D, SE|D resids)
+powerTransform(cbind(PtEst,SE)~Ntransects,data = trashLong[Index,], family="bcPower", )
+
+
+y<-tapply(trashLong$SE[Index],list(trashLong$Ntransects[Index],trashLong$time[Index]),function(x){
+    s_Sn(x[!is.na(x)])})^2
+# t(y)
+#            800     1000     1200     1400      1600
+# NaDens 2.498393 1.923884 1.241342 1.060205 0.8898093
+
+###############################
+# 2. compare resulting transformations
+###############################
+plot((129.29+1.81*40.3)/sqrt(seq(800,1600,200)),x,pty="s",
+     xlab="Direct MC est SE(D-hat)",ylab=expression(paste("Robust location est of  ",hat(SE))))
+abline(0,1,lty=1)
+
+trash<-(129.29+1.81*40.3)/sqrt(seq(800,1600,200))
+summary(lm(x~trash))
+# Coefficients:
+#            Estimate Std. Error t value Pr(>|t|)    
+#(Intercept)  0.69919    0.06401   10.92  0.00164 ** 
+#trash        0.73138    0.01064   68.72 6.79e-06 ***
+#Residual standard error: 0.01764 on 3 degrees of freedom
+#Multiple R-squared:  0.9994,	Adjusted R-squared:  0.9992
+
+#so robust location of Bootstrap is about 0.73 of actual.
+# e.g., bootstrap is underestimating true sampling variability.
+
+###############################
+# 1. mv boxCox (package CAR) to each scenario
+# 2. compare resulting transformations - 
+# 3. Resolve need for standardization & iteration...
+# 3.b common (robust) rho?
+# 3.c monotonic pattern w/ Ntransects?
+# 4. apply common mv boxCox to all scenarios for given \theta
+# 5. repeat remaining steps from above for modeling g_1(D)... per unit, etc.
+# 6. model g_2(SE)|g_1(D) each scenario
+# 7. ?Robust? estimation of location and scale for g_2(SE)|g_1(D),
+# 8. per unit variance model or other direct modeling of res variance?
+# 9. model relevant MVN location/scale for \theta
+################################################
+
+###############################
+# 3. per unit variance model for SE-hat
+################################################
+#NaDens: average of Ntransect-specific per unit variances
+# $\bar{\hat{S^2_{g(n)}}} = mean(y*seq(800,1600,200)) = 1664.038
+plot(seq(800,1600,200),y,xlab="Ntransects",ylab="Robust Scale (units^2)",main="SE-hat", pch=19)
+lines(seq(800,1600,10),1664.038/seq(800,1600,10),col="red",lwd=2)
+
+###############################
+# 4. standardize both SE-hat and D-hat
+################################################
+
+
+###############################
+# 5. common (robust) rho?
+################################################
+
+
+###############################
+# 6. common bivariate box-cox? across Ntransects
+################################################
+
+
+###############################
+# 7. allow for fitting approximation model for SE-hat|D-hat=d?
+################################################
+
+```
+
+
+The approach is to develop a (simple) regression model of $\hat{SE}=f(\hat{D},n,\theta)+\epsilon_{n,\theta}$, where $\epsilon_{n,\theta} \sim F(n,\theta)$, a (simple) distribution.
+
+```{r 'Modeling SE(D)~ f(D)', eval=FALSE, echo=FALSE, cache=TRUE}
+###############################
+# If \hat{SE} is unbiased, then E(\hat{SE}^2) = frac{(\beta_0+\beta_1 \times
+# \theta)^2}{n}, based on modeling of \hat{D} above.
+# E.g., E(\hat{SE}) ~ \sqrt{per unit var} = (b0+b1*\theta)/sqrt(n) 
+###################################################
+# RESULTS from modeling per unit variance ~ f(theta) from above.
+########## NaDens ######################
+#summary(lm(sqrt(VarNaDens)~Dens,data=trashperUnit))
+#             Estimate Std. Error t value Pr(>|t|)   
+#(Intercept) 129.28916    5.58684   23.14  0.00186 **
+#Dens          1.80755    0.06058   29.84  0.00112 **
+########## NgDens ######################
+#summary(lm(sqrt(VarNgDens)~Dens,data=trashperUnit))
+#            Estimate Std. Error t value Pr(>|t|)   
+#(Intercept) 70.40167    4.46451   15.77  0.00400 **
+#Dens         1.01275    0.04841   20.92  0.00228 **
+############################################
+
+trashLong$SEofDhatfromperunit<-NA
+# NaDens
+Index<-trashLong$time=="NaDens"
+trashLong$SEofDhatfromperunit[Index]<-(129.28916+1.80755*40.3)/sqrt(trashLong$Ntransects[Index])
+plot((129.28916+1.80755*40.3)/sqrt(trashLong$Ntransects[Index]),trashLong$SE[Index],
+     ylim=c(0,50))
+abline(0,1,lwd=2,col="red")
+
+boxplot(SE~Ntransects,data=trashLong[Index,],xlab="Ntransects",ylab="Boot SE",main="hat(NaDens), Dens =40.3",ylim=c(0,50),sub="not showing SE>50")
+points
+
+
+
+
+
+# NgDens
+Index<-trashLong$time=="NgDens"
+trashLong$SEofDhatfromperunit[Index]<-(70.40167+1.01275*40.3)/sqrt(trashLong$Ntransects[Index])
+
+plot((70.40167+1.01275*40.3)/sqrt(trashLong$Ntransects[Index]),trashLong$SE[Index],
+     ylim=c(0,30),sub="some > 30")
+abline(0,1,lwd=2,col="red")
+
+boxplot(SE~Ntransects,data=trashLong[Index,],xlab="Ntransects",ylab="Boot SE",main="hat(NgDens), Dens =40.3",ylim=c(0,30),sub="not showing SE>30")
+
+##############################
+# Model SEboot =fn(SEperunit,D-hat,n,theta)
+###################
+# Model 1: simple linear, unbiased estimator
+toss<-lm(SE~SEofDhatfromperunit, data=trashLong[Index,])
+qqnorm(resid(toss))
+qqline(resid(toss))
+# could consider direct offset, e.g., slope 1, zero intercept, but clearly 
+# non-normal resids - doesn't capture right tail.
+# Also, know positive corr(Dhat, SEhat) ignored here.
+#################
+# Model 2: per unit estimator + Dhat
+toss2<-lm(SE~SEofDhatfromperunit+PtEst, data=trashLong[Index,])
+summary(toss2)
+plot(toss2)
+# spline or quad? still quad structure of resid on fitted - from PtEst
+# still long right tail compared to N
+#################
+# Model 3: log(SE)~per unit estimator + Dhat
+toss3<-lm(log(SE)~log(SEofDhatfromperunit)+PtEst, data=trashLong[Index,])
+summary(toss3)
+plot(toss3)
+# some shallow quad structure in resid vs fitted. Influ7ence?
+# skewed resids - long right tail still. Log isn't resolving it all.
+# increassing resid var w/ fitted values. - still some structure.
+#################
+# Model 4: SE~per unit estimator + poly(Dhat,2)
+toss4<-lm(SE~SEofDhatfromperunit+poly(PtEst,2), data=trashLong[Index,])
+summary(toss4)
+plot(toss4)
+# 3 very high influence points
+# not normal resid
+# resid vs fitted odd...
+#################
+# Model 5: ROBUST REGRESSION
+# SE~per unit estimator + poly(Dhat,2)
+toss5<-lmrob(log(SE)~log(SEofDhatfromperunit)+poly(PtEst,3), data=trashLong[Index,])
+summary(toss5)
+plot(toss5)
+#### STOPPED ##############
+
+
+
+
+# spline or quad
+qqnorm(resid(toss2))
+qqline(resid(toss2))
+toss<-lm(SE~SEofDhatfromperunit, data=trashLong[Index,])
+qqnorm(resid(toss))
+qqline(resid(toss))
+# could consider direct offset, e.g., slope 1, zero intercept, but clearly 
+# non-normal resids - doesn't capture right tail.
+
+
+
+xyplot(resid(toss)~PtEst|Ntransects,data=trashLong[Index,])
+# visual of dependence, with linear regression & smooth overlain
+# simple model of \hat{SE(\hat{D})} ~ \hat{D}
+xyplot(SE~PtEst|Ntransects, data=trashLong, subset=trashLong$time=="NaDens",
+       xlab="Density Est.", ylab="SE Est.", type=c("p","smooth","r"),lwd=2,
+       xlim=c(0,90),ylim=c(0,50),col="red")
+# CONSIDER robust regression - extreme (high D, high SE) combos
+# or shallow quadratic?
+
+# simple model of log(\hat{SE(\hat{D})}) ~ \hat{D}
+xyplot(log(SE)~PtEst|Ntransects, data=trashLong, subset=trashLong$time=="NaDens",
+       xlab="Density Est.", ylab="log(SE Est.)", type=c("p","smooth","r"),lwd=2,
+       xlim=c(20,90),ylim=c(0.8,4),col="red")
+# removes much of the nonlinearity; still extremes at high D.
+
+#Allocation of structure to mean model vs resid distribution?
+#transformations?
+
+toss<-lm(log(SE)~PtEst*Ntransects, data=trashLong, subset=trashLong$time=="NaDens")
+
+qqmath(~resid(toss)|Ntransects,data=trashLong,
+       prepanel = prepanel.qqmathline,
+       panel = function(x, ...) {
+          panel.qqmathline(x, ...)
+          panel.qqmath(x, ...)
+       })
+# upper tail of residuals is much longer than normal dist for each scenario
+# all slopes in qq plot look similar (similar scale)
+
+Index<-(trashLong$time=="NaDens")
+xyplot(toss$residuals~trashLong$PtEst[Index]|Ntransects, data=trashLong, subset=trashLong$time=="NaDens",
+       xlab="Density Est.", ylab="Residual (log(SE Est.))", 
+       type=c("p","g"),lwd=2)
+
+```
+
+
+
+### Step 3.i.d Shape via Families of Distributions
+In contrast to the expectation of an approximately Normal distribution for the sampling distribution of a scenario's design-based density estimates, there isn't a specific distributional family expected a priori for the sampling distribution of the (bootstrap) standard error estimates, though the distribution is expected to be right skewed.  Two strategies for identifying adequate distributional approximations were considered: (i) the Pearson family of distributions (Stuart and Ord 1994 sections 6.2-6.13) ), and (ii) Johnson's system of distributions (Stuart and Ord 1994 sections 6.27 - 6.36), which includes the log-normal distribution. In both cases, attention must be given to reducing the potential influence of relatively 'extreme' simulation results (ref earlier xyplots of Pt & SE estimates) on distribution identification and fitting. To clarify, for this application, "adequacy" of the selected analytical approximation involves consideration of both closeness of representation and ease of implementation.
+
+The Johnson system was pursued given its ease of implementation, both in terms of distribution fitting and in terms of modeling how the distribution parameters (mean and variance of underlying normal distribution) depend on the simulation scenario settings (e.g., true density and number of transects). The latter was expected to be simpler given the independence of the mean and variance for Normal family distributions (Casella & Berger ref?). [proper technical term? separable?]. 
+
+As a preliminary guide to potential distributions families, explore the Cull & Frey graph.  Note that these plots are based on 
+```{r 'Dist Family EDA - skewness:kurtosis plot', eval=TRUE, echo=FALSE, cache=TRUE}
+########################################
+# 2 Aug 2017
+# uses descdist() from fitdistrplus Package (Marie-Laure Delignette-Muller, Christophe Dutang, Regis Pouillot, Jean-Baptiste Denis, Aurelie Siberchicot 2017)
+#
+
+# 800
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+trashFamily800<-descdist(trashLong$SE[Index], boot=100)
+# [3.56, 42.95], skew 4.83, kurt 38.95; 
+# In Type IV region, nearish gamma boundary to beta region
+# bootstrap samples scattered around boundary, approx equal mix of Type IV & beta
+
+# 1000
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1000)
+trashFamily1000<-descdist(trashLong$SE[Index], boot=100)
+# [2.85, 114.93]; skew 5.96, kurt 229.11!!!!!
+# in beta region - due to extremes?
+# small % boot in Type IV, but most in beta. MULTIPLE EXTREMES?
+
+# 1200
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1200)
+trashFamily1200<-descdist(trashLong$SE[Index], boot=100)
+# [2.89, 77.99]; skew 12.06; kurt 197.68
+# in beta region - due to extremes?
+# small % boot in Type IV, but most in beta. MULTIPLE EXTREMES?
+
+# 1400
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1400)
+trashFamily1400<-descdist(trashLong$SE[Index], boot=100)
+# [2.63, 26.83]; skew 5.18; kurt 42.31
+# in beta region near gamma - due to extremes?
+# boot is mix of Type IV and beta. Multiple extremes?
+
+# 1600
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1600)
+trashFamily1600<-descdist(trashLong$SE[Index], boot=100)
+# [2.64, 35.99]; skew 6.92; kurt 75.46
+# in Type Iv region, very near gamma boundary to beta region
+# boot even mix of Type IV region & beta region. Multiple extremes?
+```
+
+#### Step 3.i.d.1 Pearson Family distributions
+As an alternative approach, we fit Pearson family distribution systems to the $\hat{SE}$ results. While the raw moments estimates suggested a Type VI family, this is an unreliable selection approach (Cheng 2011). Instead, for each family type, the empirical moments were calculated then modified, if necessary, to meet the moment restrictions for the family type, and those values used to develop initial starting values for a mle optimizer (Stuart & Ord 1994 pg 226; Becker and Kloessner 2017 - R package Pearson DS).  The mles where then used in an AIC model selection to identify the best family type.
+
+```{r 'Moment Calculations', eval=FALSE, echo=FALSE, cache=TRUE}
+# Calc first four moments directly for each scenario. Compare to results from pearsonMSC
+####
+# 10 July 2017
+##############
+
+trashCentralMomentsTrashLongSEs<-tapply(trashLong$SE,trashLong$Ntransects,function(x){
+  all.moments(x,order.max=4,central=TRUE,na.rm=TRUE)})
+# put into matrix
+trashCentralMomentsTrashLongSEs<-rbind("n800"=trashCentralMomentsTrashLongSEs$`800`,
+                                       "n1000"=trashCentralMomentsTrashLongSEs$`1000`,
+                                       "n1200"=trashCentralMomentsTrashLongSEs$`1200`,
+                                       "n1400"=trashCentralMomentsTrashLongSEs$`1400`,
+                                       "n1600"=trashCentralMomentsTrashLongSEs$'1600')
+trashCentralMomentsTrashLongSEs<-trashCentralMomentsTrashLongSEs[,-1]
+dimnames(trashCentralMomentsTrashLongSEs)[[2]]<-c("mu1","mu2","mu3","mu4")
+#Note mu1 should be zero (theoretically) since these are central moments (around mean)
+
+#Calculate \beta_1, \beta_2 following Heinrich (2004) or Stuart & Ord (1994 pg 108)
+trashCentralMomentsTrashLongSEs<-cbind(trashCentralMomentsTrashLongSEs,
+ "Beta1"=trashCentralMomentsTrashLongSEs[,3]^2/trashCentralMomentsTrashLongSEs[,2]^3,
+ "Beta2"=trashCentralMomentsTrashLongSEs[,4]/trashCentralMomentsTrashLongSEs[,2]^2)
+
+# Calculate kappa, following Stuart & Ord 1994 pg 219, eqn (6.10)
+trashMomBeta1<-trashCentralMomentsTrashLongSEs[,5]
+trashMomBeta2<-trashCentralMomentsTrashLongSEs[,6]
+trashCentralMomentsTrashLongSEs<-cbind(trashCentralMomentsTrashLongSEs,
+  "Kappa"=trashMomBeta1*(trashMomBeta2+3)^2/(4*(4*trashMomBeta2-3*trashMomBeta1)*(2*trashMomBeta2-3*trashMomBeta1-6)))
+
+#print for report
+trashCentralMomentsTrashLongSEs
+
+# Pearson Diagram
+pearsonDiagram(max.skewness = sqrt(max(trashCentralMomentsTrashLongSEs[,5])+5), 
+               max.kurtosis = max(trashCentralMomentsTrashLongSEs[,6])+5)
+points(x=trashCentralMomentsTrashLongSEs[,5],y=trashCentralMomentsTrashLongSEs[,6],pch=19,cex=1)
+# Suggests Pearson Type VI (Beta Distr of second type)
+
+```
+
+```{r 'Fit Pearson family distributions MLEs', eval=TRUE, echo=FALSE, cache=TRUE}
+# NOTE ON symbols for Pearson IV from PearsonDS package & Heinrich (2004)
+# m - first shape parameter > 1/2
+# nu - second shape parameter (skewness); != 0
+# location - \lambda in Heinrich (2004)
+# scale - 'a' in Heinrich (2004); >0
+
+## 2017 Aug 1 Trying to dive into optimization control parameters
+## pearsonFitML effectively calls pearsonIVfitML(), but can't find that function
+## anywhere (e.g., objects(16, all.names=TRUE) doesn't list it, etc.) Trying to 
+## get a view of it to see its actual details.
+
+# 800
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+Pfit800<-pearsonFitML(trashLong$SE[Index])
+print(unlist(Pfit800))
+# type         m        nu  location     scale 
+# 4.000000  2.134607 -7.487932  3.302628  1.054409
+
+# 1000
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1000)
+Pfit1000<-pearsonFitML(trashLong$SE[Index])
+print(unlist(Pfit1000))
+#  type          m         nu   location      scale 
+# 4.0000000  1.6345811 -3.7103815  3.6507673  0.9054355 
+
+# 1200
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1200)
+Pfit1200<-pearsonFitML(trashLong$SE[Index])
+print(unlist(Pfit1200))
+#      type          m         nu   location      scale 
+# 4.0000000  1.6992055 -3.1075736  3.5255383  0.9254289
+
+# 1400
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1400)
+Pfit1400<-pearsonFitML(trashLong$SE[Index])
+print(unlist(Pfit1400))
+#   type         m        nu  location     scale 
+# 4.000000  2.013215 -3.716494  3.125764  1.055779
+
+# 1600
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1600)
+Pfit1600<-pearsonFitML(trashLong$SE[Index])
+print(unlist(Pfit1600))
+#     type         m        nu  location     scale 
+# 4.000000  1.958031 -4.251641  2.984558  0.811455
+
+Pfit<-cbind(Ntransects=seq(800,1600,200),rbind(unlist(Pfit800),unlist(Pfit1000),unlist(Pfit1200),unlist(Pfit1400),unlist(Pfit1600)))
+
+#     Ntransects type        m        nu location     scale
+#[1,]        800    4 2.134607 -7.487932 3.302628 1.0544089
+#[2,]       1000    4 1.634581 -3.710381 3.650767 0.9054355
+#[3,]       1200    4 1.699205 -3.107574 3.525538 0.9254289
+#[4,]       1400    4 2.013215 -3.716494 3.125764 1.0557793
+#[5,]       1600    4 1.958031 -4.251641 2.984558 0.8114550
+```
+
+The mles identified the sampling distribution of the $\hat{SE}$s were best characterized as a Pearson Type IV distribution, which are asymmetric with extensive tails (Heinrich 2004). These distributions have four parameters (Stuart & Ord 1994; Heinrich 2004):
+* m - first shape parameter; m > 1/2;
+* $\nu$ - second shape parameter (skewness); $ \nu != 0$;
+* location - $\lambda$;
+* scale - a; a >0
+
+The moment restrictions for Pearson Type IV, used in step two of the fitting process (above), are (based on the functions' code as given at https://rdrr.io/cran/PearsonDS/src/R/fit.r): 
+if kurtosis (4th moment) $kkk <= 3$, then set $kkk = 4$;
+if skewness (3rd moment) $sss = 0$ or $\ge slim2$, where $slim2 = (kkk^2 + 78 \times kkk-63-\sqrt(kkk+147) \times \sqrt(kkk+3)^3)/72$ and kkk is the (possibly modified) kurtosis value, then set $sss =  sign(sss) \times 0.5 \times \sqrt(\text{slim2})$.
+
+#### Step 3.i.d.2 Assessing Pearson Type IV mles
+The parameter estimates for the Pearson IVs are not all monotonic, as would be desired (expected?) for smooth changes in distribution as a function of Ntransects. In particular, the expectation is that the location and scale estimates should be monotonically decreasing (e.g., smaller $E(\hat{SE})$) for increasing number of transects. 
+
+     Ntransects type        m        nu location     scale
+[1,]        800    4 2.134607 -7.487932 3.302628 1.0544089
+[2,]       1000    4 1.634581 -3.710381 3.650767 0.9054355
+[3,]       1200    4 1.699205 -3.107574 3.525538 0.9254289
+[4,]       1400    4 2.013215 -3.716494 3.125764 1.0557793
+[5,]       1600    4 1.958031 -4.251641 2.984558 0.8114550
+
+```{r 'Pearson Family IV params', eval=FALSE, echo=FALSE, cache=TRUE}
+
+#formula for mode from Heinrich (2004) pg 3 MODE= \lambda - (a*\nu)/(2*m)
+trashMode<-Pfit[,5]-(Pfit[,6]*Pfit[,4])/(2*Pfit[,3])
+#cat("Modes are at: ")
+#round(trashMode,4)
+# 5.1520 4.6784 4.3718 4.1003 3.8655
+# These are reasonable, and monotonic decreasing with increasing # of transects (sample size).
+
+# formula for mean from Heinrich (2004) pg 4 MEAN= \lambda - (a*\nu)/(2*(m-1))
+trashMean<-Pfit[,5]-(Pfit[,6]*Pfit[,4])/(2*(Pfit[,3]-1))
+#cat("Means are at: ")
+#round(trashMean,4)
+# [1] 6.7820 6.2978 5.5820 5.0621 4.7851
+# Again, appear reasonable and monotonic decreasing. Mode < Mean, as expected for + skewed dist.
+
+#formula for var from Heinrich (2004) pg 4 Var= a^2(r^2+nu^2)/(r^2(r-1)),
+# where r = 2(m-1)
+trashr<-2*(Pfit[,3]-1)
+
+trashVar<-(Pfit[,6]^2)*(trashr^2 +Pfit[,4]^2)/((trashr-1)*trashr^2)
+#cat("Var are: ")
+#round(trashVar,4)
+#10.4139 29.0776 12.7648  4.7387  4.2579
+# something funky with 1000 & 1200 transects....extremes? robustness
+
+##############################
+#Following Heinrich (2004, pg 4) for equations for \beta_1 and \beta_2 used in 
+# defining a measure of skewness (Stuart & Ord, 1994, Vol 1., Sectin 3.31, pg 108)
+
+#Skewness squared
+#\beta_1 : defined to have same sign as \mu_3, so may be +/- (footnote 2, Heinrich (2004) pg 4).
+trashBeta1<-((-4*Pfit[,4]/(trashr-2))^2)*((trashr-1)/(trashr^2+Pfit[,4]^2))
+#trashBeta1
+#  256.625624     7.218345    14.647582 18122.150545  1729.100978
+# no idea how to interpret. Values all over the place - four orders of magnitude.
+# all positive - which is good!
+
+#Kurtosis
+#\beta_2
+trashBeta2<-3*(trashr-1)*((trashr+6)*(trashr^2+Pfit[,4]^2)-8*trashr^2)/((trashr-2)*(trashr-3)*(trashr^2+Pfit[,4]^2))
+#trashBeta2
+# [1] -147.017908    4.105337    7.506611 -741.123713  198.313107
+# no real idead how to interpret, though change in sign is concerning as potentially problematic.
+# NOTE: for all distributions: \beta2 >= 1 + \beta1 
+# (Stuart & Ord,1994, Vol 1, Exercixe 3.19, pg 122).
+# These results fail this test (unless I'm screwing up my formulas for $\beta_1$ and $\beta_2$).
+# ISSUE with optimizer?
+
+# Q: are negative values of \beta1 and \beta2 allowed?
+#PearsonDiagram suggests NOT (see also Stuart & Ord 1994 pg 216, Figure 6.1)
+# plot Pearson Diagram identifying different areas of (\beta_1,\beta_2) space
+#pearsonDiagram()
+# add 
+#points(x=abs(trashBeta1),y=abs(trashBeta2),pch=19)
+
+# Pearson msr skewness; page 108 Stuart & ORd, equation 3.87.
+# (mean-mode)/std dev
+#cat("Skewness: ")
+trashPSkewness<-(sqrt(trashBeta1)*(trashBeta2+3))/(2*(5*trashBeta2-6*trashBeta1-9))
+# For unimodal distributions this measure must be between -1 & 1.
+# 0.5050917 -0.3003125 -0.3387482  0.4418289 -0.4456483
+# While all between -1 & 1, sign change is problematic, as is non-monotonic change in skewness
+# with Ntransects. 
+# ISSUE with optimizer?
+
+# kappa, Stuart & Ord 1994 pg 219, eqn (6.10)
+trashkappa<-trashBeta1*(trashBeta2+3)^2/(4*(4*trashBeta2-3*trashBeta1)*(2*trashBeta2-3*trashBeta1-6))
+#trashkappa
+#      800      1000      1200      1400      1600 
+#0.9158859 0.8952527 0.8316003 0.7708311 0.8311874 
+# So, following Stuart & Ord 1994 pg 218/219, the roots of quadratic are complex so Type IV
+
+trashPIVdistFeatures<-rbind(Mode=trashMode,Mean=trashMean,Var=trashVar,
+                            PearsonSkewness= trashPSkewness,
+                            Beta1=trashBeta1,Beta2=trashBeta2,kappa=trashkappa)
+dimnames(trashPIVdistFeatures)[[2]]<-seq(800,1600,200)
+t(round(trashPIVdistFeatures,4))
+```
+In terms of more directly interpretable distribution characteristics (table above), while the mode and mean are monotonically declining with number of transects (rows), the variance, Pearson Skewness, squared skewness ($\beta_1$), $\beta_2$ (DEFINE), and kappa (DEFINE) are not monotonic, suggesting potential issues with the robustness of the fitted mles or the optimization process.
+
+Further, while $\beta_1$ can be either negative or positive, $\beta_2$ should be >0???? **CHECK**
+
+#### Step 3.i.d.3 Visual Assessment of fitted distributions
+The quantile plots suggest the fitted Pearson IV distributions are generally adequate approximations to the simulation results, especially in terms of capturing the skewness and right tails.  There is some suggestion that the modes may not be exactly captured. 
+
+**ADD FIGURE CAPTIONS EXPLAINING qqtest figures** 
+```{r 'Pearson Family IV qqplot', eval=TRUE, echo=FALSE, cache=TRUE}
+######################
+## 28 June 2017, using package qqtest
+######################
+
+##############
+# 1. Sampling Dist of NaDens, of SE(NaDens)?
+# normality of Pt Est using qqtest. ONE Scenario at a time.
+#  gaussian - qqplot, but just show one panel, use sim shadow to decide on departure
+
+# for plots
+pVector<-c(seq(.01,.04,.01),seq(.05,.25,0.05),.5,seq(.75,.95,.05),seq(.96,.99,.01))
+
+# 800
+#Extract results for specific Ntransects setting
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+# qqplot against fitted Pearson IV
+result <- qqtest(trashLong$SE[Index], qfunction=function(p){qpearsonIV(p,params=Pfit[1,3:6])},
+                 rfunction=function(n){rpearsonIV(n,params=Pfit[1,3:6])},
+                 p=pVector,np=500, xAxisAsProbs = TRUE,yAxisAsProbs=FALSE,
+                 xAxisProbs=pVector,nreps=100,
+                 main=paste("800 Transects"), ylab=expression(paste(hat(SE)," from simulations")),
+                 legend=FALSE,cex=0.75, col="grey20", pch=21)
+# Looks good.
+
+# 1000
+#Extract results for specific Ntransects setting
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1000)
+# qqplot against fitted Pearson IV
+result <- qqtest(trashLong$SE[Index], qfunction=function(p){qpearsonIV(p,params=Pfit[2,3:6])},
+                 rfunction=function(n){rpearsonIV(n,params=Pfit[2,3:6])},
+                 p=pVector,np=500, xAxisAsProbs = TRUE,yAxisAsProbs=FALSE,
+                 xAxisProbs=pVector,nreps=100,
+                 main=paste("1000 Transects"), 
+                 ylab=expression(paste(hat(SE)," from simulations")),
+                 legend=FALSE,cex=0.75, col="grey20", pch=21)
+# Looks good.
+
+# 1200
+#Extract results for specific Ntransects setting
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1200)
+# qqplot against fitted Pearson IV
+result <- qqtest(trashLong$SE[Index], qfunction=function(p){qpearsonIV(p,params=Pfit[3,3:6])},
+                 rfunction=function(n){rpearsonIV(n,params=Pfit[3,3:6])},
+                 p=pVector,np=500, xAxisAsProbs = TRUE,yAxisAsProbs=FALSE,
+                 xAxisProbs=pVector,nreps=100,
+                 main=paste("1200 Transects"), 
+                 ylab=expression(paste(hat(SE)," from simulations")),
+                 legend=FALSE,cex=0.75, col="grey20", pch=21)
+# Looks good.
+
+# 1400
+#Extract results for specific Ntransects setting
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1400)
+# qqplot against fitted Pearson IV
+result <- qqtest(trashLong$SE[Index], qfunction=function(p){qpearsonIV(p,params=Pfit[4,3:6])},
+                 rfunction=function(n){rpearsonIV(n,params=Pfit[4,3:6])},
+                 p=pVector,np=500, xAxisAsProbs = TRUE,yAxisAsProbs=FALSE,
+                 xAxisProbs=pVector,nreps=100,
+                 main=paste("1400 Transects"), 
+                 ylab=expression(paste(hat(SE)," from simulations")),
+                 legend=FALSE,cex=0.75, col="grey20", pch=21)
+# looks okay - perhaps tiny wonky at left tail but generally good.
+
+# 1600
+#Extract results for specific Ntransects setting
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1600)
+# qqplot against fitted Pearson IV
+result <- qqtest(trashLong$SE[Index], qfunction=function(p){qpearsonIV(p,params=Pfit[5,3:6])},
+                 rfunction=function(n){rpearsonIV(n,params=Pfit[5,3:6])},
+                 p=pVector,np=500, xAxisAsProbs = TRUE,yAxisAsProbs=FALSE,
+                 xAxisProbs=pVector,nreps=100,
+                 main=paste("1600 Transects"), 
+                 ylab=expression(paste(hat(SE)," from simulations")),
+                 legend=FALSE,cex=0.75, col="grey20", pch=21)
+
+```
+
+Similarly, density plots, based on a kernal density smoother for the simulated $\hat{SE}$s suggest the Pearson Type IV distributions and mles are very good. Note that the small 'bumps' in the right tails of the simulation results reveal the presence of a couple extreme results, but overall these have not seemed to unduly influenced the mles.
+```{r "Pearson IV density line plots", eval=TRUE, echo=FALSE, cache=TRUE}
+# 800
+#Extract results for specific Ntransects setting
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+densityplot(~SE,data=trashLong, subset=Index, type="density",lwd=2,
+            main=expression(paste("Density of ",hat(SE),", Ntransects = 800")),
+            panel=function(x,...){
+              panel.densityplot(x,...)
+              panel.mathdensity(dmath=dpearsonIV,col="red",args=Pfit[1,3:6])
+            })
+
+
+# 1000
+#Extract results for specific Ntransects setting
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1000)
+densityplot(~SE,data=trashLong, subset=Index, type="density",lwd=2,
+            main=expression(paste("Density of ",hat(SE),", Ntransects = 1000")),
+            panel=function(x,...){
+              panel.densityplot(x,...)
+              panel.mathdensity(dmath=dpearsonIV,col="red",args=Pfit[2,3:6])
+            })
+
+
+# 1200
+#Extract results for specific Ntransects setting
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1200)
+densityplot(~SE,data=trashLong, subset=Index, type="density",lwd=2,
+            main=expression(paste("Density of ",hat(SE),", Ntransects = 1200")),
+            panel=function(x,...){
+              panel.densityplot(x,...)
+              panel.mathdensity(dmath=dpearsonIV,col="red",args=Pfit[3,3:6])
+            })
+
+
+# 1400
+#Extract results for specific Ntransects setting
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1400)
+densityplot(~SE,data=trashLong, subset=Index, type="density",lwd=2,
+            main=expression(paste("Density of ",hat(SE),", Ntransects = 1400")),
+            panel=function(x,...){
+              panel.densityplot(x,...)
+              panel.mathdensity(dmath=dpearsonIV,col="red",args=Pfit[4,3:6])
+            })
+
+
+# 1600
+#Extract results for specific Ntransects setting
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1600)
+densityplot(~SE,data=trashLong, subset=Index, type="density",lwd=2,
+            main=expression(paste("Density of ",hat(SE),", Ntransects = 1600")),
+            panel=function(x,...){
+              panel.densityplot(x,...)
+              panel.mathdensity(dmath=dpearsonIV,col="red",args=Pfit[5,3:6])
+            })
+
+```
+
+#### Step 3.i.d.4 Revisiting mle optimization algorithms
+The non-monotonicity of the parameter estimates with respect to the number of transects (simulation scenarios) raises potential concern for very flat likelihood surfaces and the performance of the mle optimization routine used by the pearsonFitML() function, which is just a simple call to nlimb() and does not include any information on the gradient of the log-likelihood or parameter scaling, etc.
+
+The mles were refit incorporating information on the parameter bounds, the gradient of the log-likelihood surface, and parameter scaling to improve the search. The results (below) revealed potentially problematic correlations among the m, $\nu$, and location parameters (e.g., relatively flat likelihood in some of those dimensions), relatively high uncertainty around the $\nu$ value, and, in all cases, the existence of relatively extreme observations poorly captured by the Pearson Type IV distribution. Otherwise the distribution family appeared to perform well.
+```{r 'Revisit Pearson MLE Optimization', eval=TRUE, echo=FALSE, cache=TRUE}
+# 2 Aug 2017
+# 'Working theory' that non-monotonicity in parameters reflects flat likelihood surface,
+# not an 'incoherent' pattern of change...
+# NEXT STEPS: 
+# - improve optimization by incorporating
+#     (a) incorporate numerical gradient, 
+#     (b) bounds on m and scale, and 
+#     (c) parameter scale information.
+# - explore likelihood surface of (basic) mle
+# - develop strategy for weighted mle to 'robustify' against extreme results
+####################################
+# To improve optimization process, use pearsonIV density, prob dist, etc., functions
+# from PearsonDS package with fitdist() from package fitdistrplus, which calls
+# optim() rather than nlimb().
+# Modify call to optim() to use numerical gradient ("L-BFGS-B" algorithm) with
+# bounds on m and scale parameters and parscale argument.
+#########################
+# NOTE: if end up with different mle, consider impact on model selection
+###############
+
+# 800
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+# use (possibly modified) moments for Pearson IV (see pearsonIVfitML in PearsonDS package)
+startValue<-pearsonIVfindM(moments=empMoments(trashLong$SE[Index]))[-1]
+# try L-BFGS-B optimization method, which uses numerical approx to gradient & 
+# box bounds on parameters
+# Review of nlminb()-based results from pearsonFitML() for changes in param mles
+# across values of Ntransect suggests potential value of parameter scaling in optim() call
+Pfit800fitdist<-fitdist(trashLong$SE[Index],distr="pearsonIV", method="mle",
+                        start=startValue,optim.method="L-BFGS-B",
+                        lower=c(0.5,-Inf,-Inf,0),upper=c(Inf,Inf,Inf,Inf),
+                        control=list(trace=TRUE, REPORT=TRUE,
+                                     parscale=c(0.1,1,0.1,0.1)),discrete=FALSE)
+summary(Pfit800fitdist)
+# $estimate
+#        m        nu  location     scale 
+# 2.134629 -7.486746  3.302626  1.054621 
+# Similar to results for pearsonFitML()
+
+#Pfit800fitdist$sd #from numerically est Hessian
+#        m        nu  location     scale 
+# 0.2667701 4.2149184 0.4309361 0.3016635
+# sd are of same order of magnitude as changes across Ntransects - 
+#  nu is especially problematic.
+
+#Pfit800fitdist$cor
+#                  m         nu   location      scale
+# m         1.0000000 -0.8182302 -0.8519904 -0.4837454
+# nu       -0.8182302  1.0000000  0.9820094  0.8913678
+# location -0.8519904  0.9820094  1.0000000  0.8203908
+# scale    -0.4837454  0.8913678  0.8203908  1.0000000
+# Strong confounding among parameters - poor identification. Over fitting?
+
+plot(Pfit800fitdist)
+# suggests some extremes in simulations - again, issue of robustness?
+# way to downweight in mle?
+
+llplot(Pfit800fitdist)
+# super flat log-likelihood
+# way to use info to improve parscale?
+###############################################
+
+# 1000
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1000)
+# use (possibly modified) moments for Pearson IV (see pearsonIVfitML in PearsonDS package)
+startValue<-pearsonIVfindM(moments=empMoments(trashLong$SE[Index]))[-1]
+# try L-BFGS-B optimization method, which uses numerical approx to gradient & 
+# box bounds on parameters
+# Review of nlminb()-based results from pearsonFitML() for changes in param mles
+# across values of Ntransect suggests potential value of parameter scaling in optim() call
+Pfit1000fitdist<-fitdist(trashLong$SE[Index],distr="pearsonIV", method="mle",
+                        start=startValue,optim.method="L-BFGS-B",
+                        lower=c(0.5,-Inf,-Inf,0),upper=c(Inf,Inf,Inf,Inf),
+                        control=list(trace=TRUE, REPORT=TRUE,
+                                     parscale=c(0.1,1,0.1,0.1)),discrete=FALSE)
+summary(Pfit1000fitdist)
+#  L-BFGS-B needs finite values. EXTREMES?
+
+plot(Pfit1000fitdist)
+
+llplot(Pfit1000fitdist)
+###############################################
+
+# 1200
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1200)
+# use (possibly modified) moments for Pearson IV (see pearsonIVfitML in PearsonDS package)
+startValue<-pearsonIVfindM(moments=empMoments(trashLong$SE[Index]))[-1]
+# try L-BFGS-B optimization method, which uses numerical approx to gradient & 
+# box bounds on parameters
+# Review of nlminb()-based results from pearsonFitML() for changes in param mles
+# across values of Ntransect suggests potential value of parameter scaling in optim() call
+Pfit1200fitdist<-fitdist(trashLong$SE[Index],distr="pearsonIV", method="mle",
+                        start=startValue,optim.method="L-BFGS-B",
+                        lower=c(0.5,-Inf,-Inf,0),upper=c(Inf,Inf,Inf,Inf),
+                        control=list(trace=TRUE, REPORT=TRUE,
+                                     parscale=c(0.1,1,0.1,0.1)),discrete=FALSE)
+summary(Pfit1200fitdist)
+#Fitting of the distribution ' pearsonIV ' by maximum likelihood 
+#Parameters : 
+#           estimate Std. Error
+# m         1.6992370 0.15631035
+# nu       -3.1076869 0.73941935
+# location  3.5255278 0.17222563
+# scale     0.9254373 0.09147963
+# Loglikelihood:  -866.5338   AIC:  1741.068   BIC:  1757.91 
+# Correlation matrix:
+#                  m          nu   location       scale
+# m         1.0000000 -0.79451027 -0.7321052  0.58358805
+# nu       -0.7945103  1.00000000  0.9616011 -0.06410223
+# location -0.7321052  0.96160114  1.0000000 -0.08442890
+# scale     0.5835880 -0.06410223 -0.0844289  1.00000000
+
+plot(Pfit1200fitdist) # EXTREMES
+
+llplot(Pfit1200fitdist)
+###############################################
+
+# 1400
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1400)
+# use (possibly modified) moments for Pearson IV (see pearsonIVfitML in PearsonDS package)
+startValue<-pearsonIVfindM(moments=empMoments(trashLong$SE[Index]))[-1]
+# try L-BFGS-B optimization method, which uses numerical approx to gradient & 
+# box bounds on parameters
+# Review of nlminb()-based results from pearsonFitML() for changes in param mles
+# across values of Ntransect suggests potential value of parameter scaling in optim() call
+Pfit1400fitdist<-fitdist(trashLong$SE[Index],distr="pearsonIV", method="mle",
+                        start=startValue,optim.method="L-BFGS-B",
+                        lower=c(0.5,-Inf,-Inf,0),upper=c(Inf,Inf,Inf,Inf),
+                        control=list(trace=TRUE, REPORT=TRUE,
+                                     parscale=c(0.1,1,0.1,0.1)),discrete=FALSE)
+summary(Pfit1400fitdist)
+# Fitting of the distribution ' pearsonIV ' by maximum likelihood 
+# Parameters : 
+#          estimate Std. Error
+# m         2.013216  0.2382783
+# nu       -3.716498  1.1169710
+# location  3.125763  0.2298801
+# scale     1.055779  0.1061818
+# Loglikelihood:  -826.0162   AIC:  1660.032   BIC:  1676.891 
+# Correlation matrix:
+#                  m          nu    location       scale
+# m         1.0000000 -0.84581056 -0.80077275  0.53570630
+# nu       -0.8458106  1.00000000  0.97630503 -0.06828619
+# location -0.8007727  0.97630503  1.00000000 -0.07944881
+# scale     0.5357063 -0.06828619 -0.07944881  1.00000000
+
+
+plot(Pfit1400fitdist) # Extremes
+
+llplot(Pfit1400fitdist)
+###############################################
+
+# 1600
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1600)
+# use (possibly modified) moments for Pearson IV (see pearsonIVfitML in PearsonDS package)
+startValue<-pearsonIVfindM(moments=empMoments(trashLong$SE[Index]))[-1]
+# try L-BFGS-B optimization method, which uses numerical approx to gradient & 
+# box bounds on parameters
+# Review of nlminb()-based results from pearsonFitML() for changes in param mles
+# across values of Ntransect suggests potential value of parameter scaling in optim() call
+Pfit1600fitdist<-fitdist(trashLong$SE[Index],distr="pearsonIV", method="mle",
+                        start=startValue,optim.method="L-BFGS-B",
+                        lower=c(0.5,-Inf,-Inf,0),upper=c(Inf,Inf,Inf,Inf),
+                        control=list(trace=TRUE, REPORT=TRUE,
+                                     parscale=c(0.1,1,0.1,0.1)),discrete=FALSE)
+summary(Pfit1600fitdist)
+# Fitting of the distribution ' pearsonIV ' by maximum likelihood 
+# Parameters : 
+#           estimate Std. Error
+# m         1.9580497 0.20781939
+# nu       -4.2517742 1.31908072
+# location  2.9845195 0.19098240
+# scale     0.8114549 0.09169015
+# Loglikelihood:  -759.0839   AIC:  1526.168   BIC:  1543.026 
+# Correlation matrix:
+#                  m         nu   location     scale
+# m         1.0000000 -0.8042253 -0.7739062 0.2278511
+# nu       -0.8042253  1.0000000  0.9765915 0.3465074
+# location -0.7739062  0.9765915  1.0000000 0.3030930
+# scale     0.2278511  0.3465074  0.3030930 1.0000000
+
+
+plot(Pfit1600fitdist) # extremes
+
+llplot(Pfit1600fitdist)
+###############################################
+# Two issues: 
+# a. Influence of extremes? can incorporate weights into fitdist()
+# b. Ways to constrain parameters & fit as hierarchical model (e.g., Bayes HM?)
+################################
+
+```
+
+#### Step 3.i.d.5 Weighted mle
+The mles for the Pearson Type IV distributions were refit after downweighting the small number of extreme simulation results observed in each scenario (see plots of fitted vs theoretical distribution, above). 
+The potential weighting schemes include a variety of approaches:
+1. robust estimation of Pearson IV (kstep weighting) - too complicated to implement;
+2. censor results that exceed a specific threshold qualitatively selected (visual, %, value);
+3. censor those that appear visually extreme relative to fitted mle's (above)
+
+The first strategy is too complicated to pursue.
+The second is rather qualitative but easily implemented, as is the third.
+The third is somewhat intermediate in that it incorporates some info on selected distributional form.
+
+Redo w/o largest 1% of observations. Drop top 5 simulations or censor? Drop - simpler to implement.
+
+```{r 'Pearson MLE Optimization: Trimmed or Weighted', eval=TRUE, echo=FALSE, cache=TRUE}
+# 2 Aug 2017
+# 'Working theory' that non-monotonicity in parameters reflects flat likelihood surface,
+# not an 'incoherent' pattern of change...
+# NEXT STEPS: 
+# - improve optimization by incorporating
+#     (a) incorporate numerical gradient, 
+#     (b) bounds on m and scale, and 
+#     (c) parameter scale information.
+# - explore likelihood surface of (basic) mle
+# - develop strategy for weighted mle to 'robustify' against extreme results
+####################################
+# To improve optimization process, use pearsonIV density, prob dist, etc., functions
+# from PearsonDS package with fitdist() from package fitdistrplus, which calls
+# optim() rather than nlimb().
+# Modify call to optim() to use numerical gradient ("L-BFGS-B" algorithm) with
+# bounds on m and scale parameters and parscale argument.
+#########################
+# NOTE: if end up with different mle, consider impact on model selection
+###############
+
+# 800
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+trashTrim<-sort(trashLong$SE[Index])[1:495]
+# use (possibly modified) moments for Pearson IV (see pearsonIVfitML in PearsonDS package)
+startValue<-pearsonIVfindM(moments=empMoments(trashTrim))[-1]
+# try L-BFGS-B optimization method, which uses numerical approx to gradient & 
+# box bounds on parameters
+# Review of nlminb()-based results from pearsonFitML() for changes in param mles
+# across values of Ntransect suggests potential value of parameter scaling in optim() call
+Pfit800fitdistTrim<-fitdist(trashTrim,distr="pearsonIV", method="mle",
+                        start=startValue,optim.method="L-BFGS-B",
+                        lower=c(0.5,-Inf,-Inf,0),upper=c(Inf,Inf,Inf,Inf),
+                        control=list(trace=TRUE, REPORT=TRUE,maxit=300, #default 100
+                                     parscale=c(0.1,1,0.1,0.1)),discrete=FALSE)
+summary(Pfit800fitdistTrim)
+# Converged
+# Fitting of the distribution ' pearsonIV ' by maximum likelihood 
+# Parameters : 
+#            estimate Std. Error
+# m          2.9310507  0.3259055
+# nu       -53.1095762 97.4297952
+# location   2.4884832  0.2324055
+# scale      0.2979377  0.5266901
+# Loglikelihood:  -967.0355   AIC:  1942.071   BIC:  1958.889 
+#Correlation matrix:
+#                  m         nu   location      scale
+# m         1.0000000 -0.2787010 -0.8529542 -0.1727528
+# nu       -0.2787010  1.0000000  0.5522777  0.9938304
+# location -0.8529542  0.5522777  1.0000000  0.4618740
+# scale    -0.1727528  0.9938304  0.4618740  1.0000000
+#  nu is especially problematic.
+
+plot(Pfit800fitdistTrim)
+# suggests seve extremes still in simulations - again, issue of robustness?
+# way to downweight in mle?
+
+llplot(Pfit800fitdistTrim)
+# problematic log-likelihood
+# way to improve with censoring?
+###############################################
+
+# 1000
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1000)
+trashTrim<-sort(trashLong$SE[Index])[1:495]
+# use (possibly modified) moments for Pearson IV (see pearsonIVfitML in PearsonDS package)
+startValue<-pearsonIVfindM(moments=empMoments(trashTrim))[-1]
+# try L-BFGS-B optimization method, which uses numerical approx to gradient & 
+# box bounds on parameters
+# Review of nlminb()-based results from pearsonFitML() for changes in param mles
+# across values of Ntransect suggests potential value of parameter scaling in optim() call
+Pfit1000fitdistTrim<-fitdist(trashTrim,distr="pearsonIV", method="mle",
+                        start=startValue,optim.method="L-BFGS-B",
+                        lower=c(0.5,-Inf,-Inf,0),upper=c(Inf,Inf,Inf,Inf),
+                        control=list(trace=TRUE, REPORT=TRUE,
+                                     parscale=c(0.1,1,0.1,0.1)),discrete=FALSE)
+# Converged
+summary(Pfit1000fitdistTrim)
+# Parameters : 
+#          estimate Std. Error
+# m         2.102259  0.2659291
+# nu       -5.560860  1.6792918
+# location  3.345617  0.2537965
+# scale     1.055477  0.1321599
+# Loglikelihood:  -903.6249   AIC:  1815.25   BIC:  1832.068 
+# Correlation matrix:
+#                  m         nu    location      scale
+# m         1.0000000 -0.8326894 -0.84194130 0.37752492
+# nu       -0.8326894  1.0000000  0.96844454 0.15810629
+# location -0.8419413  0.9684445  1.00000000 0.03275622
+# scale     0.3775249  0.1581063  0.03275622 1.00000000
+
+plot(Pfit1000fitdistTrim)
+# some extremes still, though perhaps too few extremes?
+
+llplot(Pfit1000fitdistTrim)
+# okay but still strong collinearity among m, nu, scale, location
+
+###############################################
+
+# 1200
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1200)
+trashTrim<-sort(trashLong$SE[Index])[1:495]
+# use (possibly modified) moments for Pearson IV (see pearsonIVfitML in PearsonDS package)
+startValue<-pearsonIVfindM(moments=empMoments(trashTrim))[-1]
+# try L-BFGS-B optimization method, which uses numerical approx to gradient & 
+# box bounds on parameters
+# Review of nlminb()-based results from pearsonFitML() for changes in param mles
+# across values of Ntransect suggests potential value of parameter scaling in optim() call
+Pfit1200fitdistTrim<-fitdist(trashTrim,distr="pearsonIV", method="mle",
+                        start=startValue,optim.method="L-BFGS-B",
+                        lower=c(0.5,-Inf,-Inf,0),upper=c(Inf,Inf,Inf,Inf),
+                        control=list(trace=TRUE, REPORT=TRUE,
+                                     parscale=c(0.1,1,0.1,0.1)),discrete=FALSE)
+# converged
+
+summary(Pfit1200fitdistTrim)
+#Fitting of the distribution ' pearsonIV ' by maximum likelihood 
+#Parameters : 
+#          estimate Std. Error
+# m         1.987337  0.2357768
+# nu       -4.049590  1.2032862
+# location  3.352358  0.2275890
+# scale     1.019646  0.1073182
+# Loglikelihood:  -836.1506   AIC:  1680.301   BIC:  1697.119 
+# Correlation matrix:
+#                  m          nu    location       scale
+# m         1.0000000 -0.84546838 -0.81217074  0.49175854
+# nu       -0.8454684  1.00000000  0.97504257 -0.01046234
+# location -0.8121707  0.97504257  1.00000000 -0.04794853
+# scale     0.4917585 -0.01046234 -0.04794853  1.00000000
+
+plot(Pfit1200fitdistTrim) # missing an extreme
+
+llplot(Pfit1200fitdistTrim)
+###############################################
+
+# 1400
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1400)
+trashTrim<-sort(trashLong$SE[Index])[1:495]
+# use (possibly modified) moments for Pearson IV (see pearsonIVfitML in PearsonDS package)
+startValue<-pearsonIVfindM(moments=empMoments(trashTrim))[-1]
+# try L-BFGS-B optimization method, which uses numerical approx to gradient & 
+# box bounds on parameters
+# Review of nlminb()-based results from pearsonFitML() for changes in param mles
+# across values of Ntransect suggests potential value of parameter scaling in optim() call
+Pfit1400fitdistTrim<-fitdist(trashTrim,distr="pearsonIV", method="mle",
+                        start=startValue,optim.method="L-BFGS-B",
+                        lower=c(0.5,-Inf,-Inf,0),upper=c(Inf,Inf,Inf,Inf),
+                        control=list(trace=TRUE, REPORT=TRUE,
+                                     parscale=c(0.1,1,0.1,0.1)),discrete=FALSE)
+summary(Pfit1400fitdistTrim)
+# Fitting of the distribution ' pearsonIV ' by maximum likelihood 
+# Parameters : 
+# m         2.919386  0.6134727
+# nu       -7.395298  4.1985518
+# location  2.605371  0.4786855
+# scale     1.203962  0.1746848
+# Loglikelihood:  -782.0271   AIC:  1572.054   BIC:  1588.872 
+# Correlation matrix:
+#                 m         nu   location      scale
+# m         1.000000 -0.9177730 -0.9188120 -0.1410770
+# nu       -0.917773  1.0000000  0.9917691  0.5067541
+# location -0.918812  0.9917691  1.0000000  0.4582196
+# scale    -0.141077  0.5067541  0.4582196  1.0000000
+
+plot(Pfit1400fitdistTrim) # Extremes
+
+llplot(Pfit1400fitdist)
+###############################################
+
+# 1600
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1600)
+trashTrim<-sort(trashLong$SE[Index])[1:495]
+# use (possibly modified) moments for Pearson IV (see pearsonIVfitML in PearsonDS package)
+startValue<-pearsonIVfindM(moments=empMoments(trashTrim))[-1]# try L-BFGS-B optimization method, which uses numerical approx to gradient & 
+# box bounds on parameters
+# Review of nlminb()-based results from pearsonFitML() for changes in param mles
+# across values of Ntransect suggests potential value of parameter scaling in optim() call
+Pfit1600fitdistTrim<-fitdist(trashTrim,distr="pearsonIV", method="mle",
+                        start=startValue,optim.method="L-BFGS-B",
+                        lower=c(0.5,-Inf,-Inf,0),upper=c(Inf,Inf,Inf,Inf),
+                        control=list(trace=TRUE, REPORT=TRUE,
+                                     parscale=c(0.1,1,0.1,0.1)),discrete=FALSE)
+summary(Pfit1600fitdistTrim)
+# Fitting of the distribution ' pearsonIV ' by maximum likelihood 
+# Parameters : 
+#           estimate Std. Error
+# m         2.614236  0.4193049
+# nu       -7.339789  3.5960027
+# location  2.659904  0.3100480
+# scale     0.878391  0.1516109
+#Loglikelihood:  -714.793   AIC:  1437.586   BIC:  1454.404 
+#Correlation matrix:
+#                  m         nu   location      scale
+# m         1.0000000 -0.8663106 -0.8775922 -0.2304651
+# nu       -0.8663106  1.0000000  0.9864530  0.6707416
+# location -0.8775922  0.9864530  1.0000000  0.6009225
+# scale    -0.2304651  0.6707416  0.6009225  1.0000000
+
+plot(Pfit1600fitdistTrim) # extremes
+
+llplot(Pfit1600fitdistTrim)
+###############################################
+# Two issues: 
+# a. Influence of extremes? can incorporate weights into fitdist()
+# b. Ways to constrain parameters & fit as hierarchical model (e.g., Bayes HM?)
+################################
+
+```
+
+Fitting the trimmed simulation results all converged and the fitted Pearson Type IV distributions well characterized the simulations. However, the high collinearity among the parameters suggested potential overfitting (poor identification). Could pursue further (ridge regression, BHM), but might also be due to shift between Type IV vs beta region.
+
+Redo selection w/ weights or censoring?
+
+#### Step 3.i.d.6 Bayesian Hierarchical Model
+A Bayesian hierarchical model was developed to directly incorporate the monotonicity of the Pearson Type IV distribution family parameters with respect to the number of transects (simulation scenarios) and true density.
+```{r 'Bayes Hierarchical to incorporate monotonicity constraints, etc.', eval=TRUE, echo=FALSE, cache=TRUE}
+# X Aug 2017
+# Constrain parameters via BHM
+################################
+
+```
+
+
+
+### Step 3.i.b Account for dependence between $\hat{SE(\hat{D})}$ and $\hat{D}$
+The approximation can be improved by incorporating the information, for a given scenario, on the covarying values of $\hat{D}$.  Not surprisingly, there is a non-negligible dependence of $\hat{SE}$ on $\hat{D}$ (as revealed by Spearman's rho values of approximately 0.78 for any simulation scenario) (see coding script above).  Thus developing an approximation for the sampling distribution of $\hat{SE}$ should account for the effect of not only the sample size and true brown bear density but, additionally, the density estimate: $\hat{SE}(\hat{D}_{n,\theta}) \sim F(\gamma(\hat{D}_{n,\theta},n,\theta),\xi(\hat{D}_{n,\theta},n,\theta),\dots)$.
+
+A large portion of the mass of the joint distribution of ($\hat{D}$,$log(\hat{SE})$)  appears approximately ellipsoidal, based on the contour plots of bivariate kernel density smooths for the different scenarios. However, for the contours break down for the higher percentiles of the distribution when D-hat is larger than mean (approximately).
+
+caption: contours from the bivariate kernel density smooth of the observations for each scenario, showing contours at percentiles: 25, 50, 75, 80, 85, 90, 95, 99.
+
+```{r 'kds of D-hat, log(SE-hat(D-hat)): degree of non-ellipticality?', eval=TRUE, echo=FALSE, cache=TRUE}
+
+# using log(SE)
+xyplot(log(SE)~PtEst|Ntransects, data=trashLong, subset=trashLong$time=="NaDens",
+       xlab="Density Est.", ylab="log(SE Est.)",xlim=c(20,90),ylim=c(.8,log(45)),
+       main="Joint Dist (D-hat,log(SE-hat))")
+# clear from figure that while MVN may get bulk of simulations, there is a tendency
+# for somewhat greater variation in \hat{SE} with higher \hat{D}, e.g., isn't really
+# ellipsoidal.
+
+#########################
+# Visual assessment: explore bivariate kernel density smoother & MVN?
+# using kde() in package ks
+library(ks)
+# n = 800
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+Hpi1 <- Hpi(x = cbind(trashLong$PtEst,log(trashLong$SE))[Index,])
+fhat1<-kde(x = cbind(trashLong$PtEst,log(trashLong$SE))[Index,],H=Hpi1)
+plot(fhat1,xlab="Density Est",ylab="log(SE Est)",main="n=800, D=40.3",
+     cont=c(seq(25,75,25),seq(80,95,5),99),xlim=c(20,90),ylim=c(.8,3.9))
+
+# n = 1000
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1000)
+Hpi1 <- Hpi(x = cbind(trashLong$PtEst,log(trashLong$SE))[Index,])
+fhat1<-kde(x = cbind(trashLong$PtEst,log(trashLong$SE))[Index,],H=Hpi1)
+plot(fhat1,xlab="Density Est",ylab="log(SE Est)",main="n=1000, D=40.3",
+     cont=c(seq(25,75,25),seq(80,95,5),99),xlim=c(20,90),ylim=c(.8,3.9))
+
+# n = 1200
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1200)
+Hpi1 <- Hpi(x = cbind(trashLong$PtEst,log(trashLong$SE))[Index,])
+fhat1<-kde(x = cbind(trashLong$PtEst,log(trashLong$SE))[Index,],H=Hpi1)
+plot(fhat1,xlab="Density Est",ylab="log(SE Est)",main="n=1200, D=40.3",
+     cont=c(seq(25,75,25),seq(80,95,5),99),xlim=c(20,90),ylim=c(.8,3.9))
+
+# n = 1400
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1400)
+Hpi1 <- Hpi(x = cbind(trashLong$PtEst,log(trashLong$SE))[Index,])
+fhat1<-kde(x = cbind(trashLong$PtEst,log(trashLong$SE))[Index,],H=Hpi1)
+plot(fhat1,xlab="Density Est",ylab="log(SE Est)",main="n=1400, D=40.3",
+     cont=c(seq(25,75,25),seq(80,95,5),99),xlim=c(20,90),ylim=c(.8,3.9))
+
+# n = 1600
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1600)
+Hpi1 <- Hpi(x = cbind(trashLong$PtEst,log(trashLong$SE))[Index,])
+fhat1<-kde(x = cbind(trashLong$PtEst,log(trashLong$SE))[Index,],H=Hpi1)
+plot(fhat1,xlab="Density Est",ylab="log(SE Est)",main="n=1600, D=40.3",
+     cont=c(seq(25,75,25),seq(80,95,5),99),xlim=c(20,90),ylim=c(.8,3.9))
+```
+
+A better approximation to the marginal distribution of $log(\hat{SE})$ is to assume $(\hat{D},log(\hat{SE})) \sim MVN(\vec{\mu},\Sigma)$ and thus the marginal distribution of $log(\hat{SE})| \hat{D}=d \sim N(\mu_{log(\hat{SE})} + \rho \sigma_{log(\hat{SE})} \frac{(d-\mu_{\hat{D}})}{\sigma_{\hat{D}}}, (1-\rho^2)\sigma_{\hat{SE}})$. Approximations for $\mu_{\hat{D}}$ and $\sigma_{\hat{D}}$ were developed above in terms of $n$ and $\theta$ and the robustly fitted values of per unit variances. Further, note that to a first order approximation, we expect $\mu_{log(\hat{SE})}$ to be roughly $log(\sigma_{\hat{D}})$.
+
+The approach is to develop a (simple) regression model of $\hat{SE}=f(\hat{D},n,\theta)+\epsilon_{n,\theta}$, where $\epsilon_{n,\theta} \sim F(n,\theta)$, a (simple) distribution.
+
+```{r 'Modeling hat{SE(hat{D})}~ f(hat{D}), including BC transform(hat{SE})~hat{D}', eval=FALSE, echo=FALSE, cache=TRUE}
+###############################
+# Robust fitting of approximation models for log(SE-hat)
+# Account for 
+# 1. expected relationship of log(SE-hat)|D-hat 
+#    under (D-hat, log(SE-hat(D-hat)) ~ MVN
+# 2. robust fitting
+# 3. naive estimator E(SE-hat)=\sigma_Dhat?
+###############################################
+# Last edits 2017 Aug 28 Joel_Reynolds@nps.gov
+################################################
+#
+# check performance visually.
+
+####### n=800 transects
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==800)
+DATA<-trashLong[Index,] # extract subset
+# calculate predictor based on observed D-hat
+DATA$LogSEPredictorFromDhat<-(DATA$PtEst-40.3)*sqrt(800)/(129.29+1.81*40.3)
+LogSEhatRobModeln800<-lmrob(log(SE)~LogSEPredictorFromDhat,data=DATA,offset=log(SEofDhatfromperunit))
+summary(LogSEhatRobModeln800)
+plot(LogSEhatRobModeln800)
+# doesn't capture heteroskedasticity, residuals not normal, but adequate?
+
+#Box Cox to improve residuals normality & heteroskedasticity?
+boxcox(log(SE)~LogSEPredictorFromDhat,data=DATA,lambda=seq(-2,2,.1))
+boxcox(log(SE)~LogSEPredictorFromDhat,data=DATA,lambda=seq(-1,0,.05))
+# best at -0.838383838
+#Refit with transformed Y
+LogSEhatRobModeln800bc<-lmrob(log(SE)^-0.84~LogSEPredictorFromDhat,data=DATA)
+summary(LogSEhatRobModeln800bc)
+plot(LogSEhatRobModeln800bc)
+# looks great, if unexplainable.
+
+# what if forgo log and just try straight box-cox?
+boxcox(SE~LogSEPredictorFromDhat,data=DATA,lambda=seq(-1,-0.8,.025))
+# best at -0.92ish, but really -1.1,-.75
+# but turns out this is totally driven by 
+SEhatRobModeln800bc<-lmrob(SE^-0.92~LogSEPredictorFromDhat,data=DATA)
+summary(SEhatRobModeln800bc)
+plot(SEhatRobModeln800bc)
+# looks adequate (better than before)
+
+####### n=1000 transects
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1000)
+DATA<-trashLong[Index,] # extract subset
+# calculate predictor based on observed D-hat
+DATA$LogSEPredictorFromDhat<-(DATA$PtEst-40.3)*sqrt(1000)/(129.29+1.81*40.3)
+LogSEhatRobModeln1000<-lmrob(log(SE)~LogSEPredictorFromDhat,data=DATA,offset=log(SEofDhatfromperunit))
+summary(LogSEhatRobModeln1000)
+plot(LogSEhatRobModeln1000)
+# doesn't capture heteroskedasticity, residuals not normal, but adequate?
+
+#Box Cox to improve residuals normality & heteroskedasticity?
+# what if forgo log and just try straight box-cox?
+boxcox(SE~LogSEPredictorFromDhat,data=DATA,lambda=seq(-2,2,.1))
+boxcox(SE~LogSEPredictorFromDhat,data=DATA,lambda=seq(-.7,-.2,.025))
+# best at -0.45ish, but really -0.65,-0.29
+SEhatRobModeln1000bc<-lmrob(SE^-0.45~LogSEPredictorFromDhat,data=DATA)
+summary(SEhatRobModeln1000bc)
+plot(SEhatRobModeln1000bc)
+# looks adequate (better than before), one super outlier
+# try under n=800 power
+SEhatRobModeln1000bcx<-lmrob(SE^-0.92~LogSEPredictorFromDhat,data=DATA)
+summary(SEhatRobModeln1000bcx)
+plot(SEhatRobModeln1000bcx)
+# okay, no major loss in performance
+
+####### n=1200 transects
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1200)
+DATA<-trashLong[Index,] # extract subset
+# calculate predictor based on observed D-hat
+DATA$LogSEPredictorFromDhat<-(DATA$PtEst-40.3)*sqrt(1200)/(129.29+1.81*40.3)
+LogSEhatRobModeln1200<-lmrob(log(SE)~LogSEPredictorFromDhat,data=DATA,offset=log(SEofDhatfromperunit))
+summary(LogSEhatRobModeln1200)
+plot(LogSEhatRobModeln1200)
+# some heteroskedasticity, residuals not normal, but adequate?
+
+#Box Cox to improve residuals normality & heteroskedasticity?
+boxcox(log(SE)~LogSEPredictorFromDhat,data=DATA,lambda=seq(-2,2,.1))
+boxcox(log(SE)~LogSEPredictorFromDhat,data=DATA,lambda=seq(-.7,.7,.05))
+# best at -0.2, -0.6 to 0.1 okay
+#Refit with transformed Y
+LogSEhatRobModeln1200bc<-lmrob(log(SE)^-0.2~LogSEPredictorFromDhat,data=DATA)
+summary(LogSEhatRobModeln1200bc)
+plot(LogSEhatRobModeln1200bc)
+# looks great, if unexplainable.
+
+# what if forgo log and just try straight box-cox?
+boxcox(SE~LogSEPredictorFromDhat,data=DATA,lambda=seq(-2,2,.1))
+boxcox(SE~LogSEPredictorFromDhat,data=DATA,lambda=seq(-1,-0.2,.025))
+# best at -0.6ish, but really -.85,-.38
+SEhatRobModeln1200bc<-lmrob(SE^-0.6~LogSEPredictorFromDhat,data=DATA)
+summary(SEhatRobModeln1200bc)
+plot(SEhatRobModeln1200bc)
+# looks adequate (better than before)
+
+####### n=1400 transects
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1400)
+DATA<-trashLong[Index,] # extract subset
+# calculate predictor based on observed D-hat
+DATA$LogSEPredictorFromDhat<-(DATA$PtEst-40.3)*sqrt(1400)/(129.29+1.81*40.3)
+LogSEhatRobModeln1400<-lmrob(log(SE)~LogSEPredictorFromDhat,data=DATA,offset=log(SEofDhatfromperunit))
+summary(LogSEhatRobModeln1400)
+plot(LogSEhatRobModeln1400)
+# doesn't capture heteroskedasticity, residuals not normal, but adequate?
+
+#Box Cox to improve residuals normality & heteroskedasticity?
+boxcox(log(SE)~LogSEPredictorFromDhat,data=DATA,lambda=seq(-2,2,.1))
+boxcox(log(SE)~LogSEPredictorFromDhat,data=DATA,lambda=seq(-1.2,-0.2,.05))
+# best at -0.75, -1.05 to -0.45
+
+# what if forgo log and just try straight box-cox?
+boxcox(SE~LogSEPredictorFromDhat,data=DATA,lambda=seq(-2,2,.1))
+boxcox(SE~LogSEPredictorFromDhat,data=DATA,lambda=seq(-1.3,-.5,.05))
+# best at -1, but really -1.25,-.85
+SEhatRobModeln1400bc<-lmrob(SE^-1~LogSEPredictorFromDhat,data=DATA)
+summary(SEhatRobModeln1400bc)
+plot(SEhatRobModeln1400bc)
+# looks adequate (better than before)
+
+####### n=1600 transects
+# index to subset out SE(NaDens) estimator for Ntransect value
+Index<-(trashLong$time=="NaDens") & (trashLong$Ntransects==1600)
+DATA<-trashLong[Index,] # extract subset
+# calculate predictor based on observed D-hat
+DATA$LogSEPredictorFromDhat<-(DATA$PtEst-40.3)*sqrt(1600)/(129.29+1.81*40.3)
+LogSEhatRobModeln1600<-lmrob(log(SE)~LogSEPredictorFromDhat,data=DATA,offset=log(SEofDhatfromperunit))
+summary(LogSEhatRobModeln1600)
+plot(LogSEhatRobModeln1600)
+# doesn't capture heteroskedasticity, residuals not normal, but adequate?
+
+#Box Cox to improve residuals normality & heteroskedasticity?
+boxcox(log(SE)~LogSEPredictorFromDhat,data=DATA,lambda=seq(-2,2,.1))
+boxcox(log(SE)~LogSEPredictorFromDhat,data=DATA,lambda=seq(-1.3,-.5,.05))
+# best at -0.95, -1.25 to -0.6
+
+# what if forgo log and just try straight box-cox?
+boxcox(SE~LogSEPredictorFromDhat,data=DATA,lambda=seq(-2,2,.1))
+boxcox(SE~LogSEPredictorFromDhat,data=DATA,lambda=seq(-1.5,-0.8,.025))
+# best at -1.16ish, but really -1.4,-.95
+SEhatRobModeln1600bc<-lmrob(SE^-1.1~LogSEPredictorFromDhat,data=DATA)
+summary(SEhatRobModeln1600bc)
+plot(SEhatRobModeln1600bc)
+# looks adequate (better than before)
+
+#####################################################
+# Redo Box-Cox on simple regression with factor(transect)
+# index to subset out SE(NaDens) estimator
+Index<-(trashLong$time=="NaDens")
+DATA<-trashLong[Index,] # extract subset
+# calculate predictor based on observed D-hat
+# NOTE: REALLY SHOULD RENAME TO SEPredictorFromDhat (drop 'log')
+DATA$LogSEPredictorFromDhat<-(DATA$PtEst-40.3)*sqrt(DATA$Ntransects)/(129.29+1.81*40.3)
+LogSEhatRobModelNtransects<-lmrob(log(SE)~LogSEPredictorFromDhat*as.factor(Ntransects),data=DATA,offset=log(SEofDhatfromperunit))
+summary(LogSEhatRobModelNtransects)
+plot(LogSEhatRobModelNtransects)
+# doesn't capture heteroskedasticity, residuals not normal, but adequate?
+
+# what if forgo log and just try straight box-cox?
+boxcox(SE~LogSEPredictorFromDhat*as.factor(Ntransects),data=DATA,lambda=seq(-2,2,.1))
+boxcox(SE~LogSEPredictorFromDhat*as.factor(Ntransects),data=DATA,lambda=seq(-1.2,-0.5,.025))
+# best at -0.8ish, but really -0.9,-0.7
+SEhatRobModelNtransectsbc<-lmrob(SE^-0.8~LogSEPredictorFromDhat*as.factor(Ntransects),data=DATA)
+summary(SEhatRobModelNtransectsbc)
+plot(SEhatRobModelNtransectsbc)
+# looks adequate & much better re: normality & residuals
+# doesn't really need change in slopes (yeah)
+# WHAT GAIN IF INCORPORATE offset of SEofDhatfromperunit?
+
+# Redo w/o interaction
+boxcox(SE~LogSEPredictorFromDhat+as.factor(Ntransects),data=DATA,lambda=seq(-2,2,.1))
+boxcox(SE~LogSEPredictorFromDhat+as.factor(Ntransects),data=DATA,lambda=seq(-1.2,-0.5,.025))
+# best at -0.7ish, but really -0.8,-0.65
+SEhatRobModelNtransectsbc<-lmrob(SE^-0.7~LogSEPredictorFromDhat+as.factor(Ntransects),data=DATA)
+summary(SEhatRobModelNtransectsbc)
+plot(SEhatRobModelNtransectsbc)
+
+
+
+# If \hat{SE} is unbiased, then E(\hat{SE}^2) = frac{(\beta_0+\beta_1 \times
+# \theta)^2}{n}, based on modeling of \hat{D} above.
+# E.g., E(\hat{SE}) ~ \sqrt{per unit var} = (b0+b1*\theta)/sqrt(n) 
+###################################################
+# RESULTS from modeling per unit variance ~ f(theta) from above.
+########## NaDens ######################
+#summary(lm(sqrt(VarNaDens)~Dens,data=trashperUnit))
+#             Estimate Std. Error t value Pr(>|t|)   
+#(Intercept) 129.28916    5.58684   23.14  0.00186 **
+#Dens          1.80755    0.06058   29.84  0.00112 **
+########## NgDens ######################
+#summary(lm(sqrt(VarNgDens)~Dens,data=trashperUnit))
+#            Estimate Std. Error t value Pr(>|t|)   
+#(Intercept) 70.40167    4.46451   15.77  0.00400 **
+#Dens         1.01275    0.04841   20.92  0.00228 **
+############################################
+trashLong$SEofDhatfromperunit<-NA
+# NaDens
+Index<-trashLong$time=="NaDens"
+trashLong$SEofDhatfromperunit[Index]<-(129.28916+1.80755*40.3)/sqrt(trashLong$Ntransects[Index])
+
+# NgDens
+Index<-trashLong$time=="NgDens"
+trashLong$SEofDhatfromperunit[Index]<-(70.40167+1.01275*40.3)/sqrt(trashLong$Ntransects[Index])
+
+
+xyplot(SE~SEofDhatfromperunit|Ntransects, data=trashLong, subset=trashLong$time=="NaDens",
+       xlab="Modeled SE Dhat", ylab="SEhat")
+
+
+
+toss<-lm(SE~PtEst*Ntransects, data=trashLong, subset=trashLong$time=="NaDens")
+
+
+# visual of dependence, with linear regression & smooth overlain
+# simple model of \hat{SE(\hat{D})} ~ \hat{D}
+xyplot(SE~PtEst|Ntransects, data=trashLong, subset=trashLong$time=="NaDens",
+       xlab="Density Est.", ylab="SE Est.", type=c("p","smooth","r"),lwd=2,
+       xlim=c(0,90),ylim=c(0,50),col="red")
+# CONSIDER robust regression - extreme (high D, high SE) combos
+# or shallow quadratic?
+
+# simple model of log(\hat{SE(\hat{D})}) ~ \hat{D}
+xyplot(log(SE)~PtEst|Ntransects, data=trashLong, subset=trashLong$time=="NaDens",
+       xlab="Density Est.", ylab="log(SE Est.)", type=c("p","smooth","r"),lwd=2,
+       xlim=c(20,90),ylim=c(0.8,4),col="red")
+# removes much of the nonlinearity; still extremes at high D.
+
+#Allocation of structure to mean model vs resid distribution?
+#transformations?
+
+toss<-lm(log(SE)~PtEst*Ntransects, data=trashLong, subset=trashLong$time=="NaDens")
+
+qqmath(~resid(toss)|Ntransects,data=trashLong,
+       prepanel = prepanel.qqmathline,
+       panel = function(x, ...) {
+          panel.qqmathline(x, ...)
+          panel.qqmath(x, ...)
+       })
+# upper tail of residuals is much longer than normal dist for each scenario
+# all slopes in qq plot look similar (similar scale)
+
+Index<-(trashLong$time=="NaDens")
+xyplot(toss$residuals~trashLong$PtEst[Index]|Ntransects, data=trashLong, subset=trashLong$time=="NaDens",
+       xlab="Density Est.", ylab="Residual (log(SE Est.))", 
+       type=c("p","g"),lwd=2)
+
+
+############# CANNABILIZE ##############
+# Robust - NaDens
+y<-round(tapply(trashLong$PtEst,list(trashLong$Ntransects,trashLong$time),median,na.rm=T),2)
+
+# MM-type estimators for linear (regression) models.
+w<-round(unique(fitted(lmrob(PtEst~factor(Ntransects),data=trashLong,subset=time=="NaDens"))),2)
+
+dotplot(Ntransects~Est,groups=Method,pch=19,cex=1.2,
+        data=data.frame(Ntransects=rep(dimnames(x)[[1]],3),
+                                              Est=c(x[,4],y[,4],w),
+                                            Method=rep(c("Mean","Median","MM"),c(5,5,5))),
+        panel=function(x,y,...){
+          panel.refline(v=40.3,lty=1,lwd=2,color="black") # add ref line at true density
+          panel.dotplot(x,y,...)
+        }, main="Location Estimators",
+        key=list(x=.8,y=.65,corner=c(0,1),border=TRUE,
+                 text=list(lab=c("Mean","Median","MM"),cex=1.2),
+                 points=list(pch=19,cex=1.2,col=trellis.par.get("superpose.symbol")$col[1:3])))
+########### roptest #####################
+ u1<-roptest(x=log(trashLong$SE[Index]),L2Fam=NormLocationScaleFamily(), 
+            eps.upper=0.05,steps = 5,OptOrIter="iterate")
+ #estimate(u1) # for Z = log(x)
+ #     mean        sd 
+ #1.7922449 0.2708314 
+
+ # use qqplot from RobAstBase
+ qqplot(log(trashLong$SE[Index]), u1,xlab="n=800",main="SE-hat vs Log-Norm")
+ # really not very good?
+
+
+```
+
+Why won't it capture everything? Well, the bivariate distribution of (x, log(y)) isn't exactly ellipsoidal (see attached). While the MVN (so far) seems not too bad an approximation, the simulations produce some extreme results for D-hat now and then and, even for reasonable D-hats, some extreme results for SE-hat(D-hat). This might have something to do with the group size and the bootstrapping process or be something funking about 'Horwitz-Thompson LIKE' estimators (e.g., the impact of throwing in estimates of the detection probability into the numerator of the esitmator), etc. All of which would be fascinating to explore further in an academic setting, but..... So feel free to remind me to get out of my ivory tower..
+
+
+### Step 3.ii Location
+Estimation approach
+Robustness considerations?
+adopt GVF process from Step 2.iii.
+
+
+## Step 4. Computational Costs / Tradeoff Comparisons
+
+## Step 5. Miscellaneous
+
+### Step 5.i Independence of D-hat/SE-hat(D-hat)
+E.g., treating as independent vrs modeling joint
+
+Better scenario designs for model fitting
+
+
